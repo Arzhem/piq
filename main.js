@@ -5,76 +5,39 @@ const compare = require('dom-compare').compare;
 const jsdom = require("jsdom");
 const fs = require('fs');
 const diff = require('diff');
-
-
 console.log("Make sure MariaDB is running\n");
 
-async function asyncFunction() {
-    let conn;
-    console.log("In func");
-    try {
-
-        conn = await pool.getConnection();
-        const usedb = await conn.query(`USE test`);
-        const rows = await conn.query("SELECT 1 as val");
-        console.log(rows);
-        // rows: [ {val: 1}, meta: ... ]
-
-        const res = await conn.query("INSERT INTO myTable value (?, ?)", [2, "wah gwaan"]);
-        console.log(res);
-        // res: { affectedRows: 1, insertId: 1, warningStatus: 0 }
-
-    } finally {
-        if (conn) {
-            conn.release();
-            console.log("Released");
-        } //release to pool
-    }
-}
-async function writeTextDifference(pastFile, presentFile) {
-    const past = fs.readFileSync(pastFile, { encoding: 'utf8' });
-    const present = fs.readFileSync(presentFile, { encoding: 'utf8' });
-    const difference = (diffMe, diffBy) => diffMe.split(diffBy).join("");
-
-    const result = difference(present, past);
-    fs.writeFile("./differences/diff.txt", result, (err) => { if (err) throw err; });
-    console.log("that's what I'm saying...\ndunkin' spiked");
-    console.log(result);
-}
 async function writeHTMLCollection(collection) {
-    var newFileName;
     try {
+        let allWords = [];
+
         for (let item of collection) {
-            var text = item.textContent.replace(/\s+/g, "\n")
-            await fs.appendFileSync('collection.txt', text);
+            const words = item.textContent.trim().split(/\s+/); // don't assume. not every page has whitespaces
+            allWords.push(...words);
         }
 
-        try { // unhinged. also prone to create problems with same name txt files
-            fs.readFileSync('collection.txt', 'utf8', (content) => {
-                if(content.length !== 0) {
-                    console.log('This file isn\'t empty. I\'m appending.');
-                } else {
-                    console.log('File is empty. Great.');
-                }
-            });
-            const data = fs.readFileSync('collection.txt', 'utf8');
-            const words = data.trim().split(/\s+/);
-            newFileName = words[3];
-        } catch (err) {
-            console.error("Error reading file:", err);
+        if (allWords.length < 4) {
+            console.log('Not enough words to name the file!');
+            return;
         }
 
-        if(fs.existsSync(newFileName+'.txt')) {
-            console.log(newFileName + ".txt already exists, dude. I'm not responsible for your problems.");
+        const newFileName = `${allWords[3]}.txt`;
+        const content = allWords.join('\n');
+
+        if (fs.existsSync(newFileName)) {
+            console.log(`Warning: ${newFileName} already exists. Left it unchanged.`);
+            return;
         }
-        fs.renameSync('collection.txt', newFileName+'.txt');
-        console.log("The file "+newFileName+".txt is ready, I guess.");
+
+        fs.writeFileSync(newFileName, content, 'utf8');
+
+        console.log(`Success: ${newFileName} is ready with ${allWords.length} lines.`);
     } catch (err) {
         console.error('Error writing files: ', err);
     }
-    console.log();
 }
-async function getPage(url) {
+
+async function getPage(url, domTag) {
     // const url = "https://www.boards.ie/discussion/2058303621/broadband-switch-deals";
     try {
         const response = await fetch(url);
@@ -86,24 +49,20 @@ async function getPage(url) {
 
         let mainWindow = dom.window.document;
 
-        let domTag = 'postbit-wrapper';
+        //let domTag = 'postbit-wrapper';
         let domContent = mainWindow.getElementsByClassName(domTag);
         await writeHTMLCollection(domContent); // manually selecting DOM
-
     } catch (error) { console.log(error); }
 }
 
 function getSanitizedContent(filePath) {
-    return fs.readFileSync(filePath, 'utf8')
+    return fs.readFileSync(filePath, 'utf8', (err) => {console.log('That file prolly doesn even exist, dude. Come on\n'); })
         .split(/\r?\n/)           // Split by any newline type
         .map(line => line.trim())  // Remove invisible leading/trailing whitespace
         .filter(line => line.length > 0) // Remove empty lines
         .join('\n');
 }
-
 function compareFiles(path1, path2) {
-    // We normalize both files here to ensure they are identical
-    // in structure before the diffing starts.
     const oldData = getSanitizedContent(path1);
     const newData = getSanitizedContent(path2);
 
@@ -125,49 +84,120 @@ function compareFiles(path1, path2) {
     if (changesFound === 0) {
         console.log("Files are identical after normalization.");
     }
+
+    console.log();
 }
 
-async function lineByLineDifference(oldFile, newFile) {
-    fs.readFile(oldFile, { encoding: 'utf8' }, (err, oldData) => {
-        if (err) throw err;
-        fs.readFile(newFile, { encoding: 'utf8' }, (err, newData) => {
-            if (err) throw err;
+function extractCharachterTranscript() {
 
-            if(newData===oldData) {
-                console.log('\nCommand, Viper. NO CHANGES. Proceed.')
-                console.log('VIPER: Wilco, all systems normal.\n')
-            } else {
-                console.log(`DIFF ${oldFile} ${newFile}: There ${oldData===newData? 'have not' : 'have'} been updates.`);
-                var difference = diff.diffLines(oldData, newFile,
-                    {
-                        ignoreWhitespace: true,
-                        newlineIsToken: true
-                    });
+}
 
-                var diffFileName = `diff-${oldFile.split('.')[0]}-${newFile.split('.')[0]}.txt`;
-                console.log(difference[1]);
-                //fs.writeFileSync(diffFileName, difference[0]);
+// FYI: the following functions don't belong here.
+async function getTBBTPage(url, domTag, searchedCharacter = '') {
+    // const url = "https://www.boards.ie/discussion/2058303621/broadband-switch-deals";
+    try {
+        const response = await fetch(url);
 
-                difference.forEach((part) => {
-                    // 'added' is true if the line is in the new file but not the old one
-                    if (part.added) {
-                        process.stdout.write(`[ADDED]   | ${part.value}`);
-                    }
-                    // 'removed' is true if the line was in the old file but not the new one
-                    else if (part.removed) {
-                        process.stdout.write(`[REMOVED] | ${part.value}`);
-                    }
-                    // We ignore the 'unchanged' parts (where part.added/removed are undefined)
-                });
+        if (!response.ok) throw new Error(response.statusText);
 
-                //console.log(`\n==== DIFFERENCE SAVED TO: ${diffFileName}.txt`);
+        const responseHTML = await response.text();
+        let dom = new jsdom.JSDOM(responseHTML);
+
+        let mainWindow = dom.window.document;
+
+        //let domTag = 'postbit-wrapper';
+        let domContent = mainWindow.getElementsByClassName(domTag);
+        await writeTBBTHTMLCollection(domContent, url, domTag, searchedCharacter, 'md'); // manually selecting DOM
+    } catch (error) { console.log(error); }
+}
+
+async function writeTBBTHTMLCollection(collection, url, domTag, searchedCharacter, writingFileFormat = 'txt') {
+    if (domTag === 'MsoNormal') {
+        try {
+            const newFileName = `${searchedCharacter.split(':')[0].toUpperCase()}-${url.split('/')[3]}.${writingFileFormat}`;
+            if (fs.existsSync(newFileName)) {
+                console.log(`Warning: ${newFileName} already exists. Overwriting.`);
+                fs.unlinkSync(newFileName);
             }
-        })
-    })
+
+            fs.openSync(newFileName, 'w');
+
+            let count = 0;
+            let lastCharacter = '';
+            let lastScene = '';
+            for (let i=0; i<collection.length; i++) {
+                const words = collection[i].textContent; // don't assume. not every page has whitespaces
+                const currentCharacter = words.split(' ')[0];
+
+                if(currentCharacter === "Scene:") {
+                    if(lastScene!=='') lastScene = '';
+                    lastScene = words;
+                }
+
+                if(currentCharacter === searchedCharacter) {
+                    count++;
+                    if (writingFileFormat === 'txt') {
+                        fs.appendFileSync(newFileName,
+                            `[${lastScene}]\n[Prev: ${ lastCharacter==='' ? 'no one' : lastCharacter.split(':')[0]}]\n`);
+                    } else if (writingFileFormat === 'md') {
+                        fs.appendFileSync(newFileName,
+                            `<span style="color: #696969">[${lastScene}]<br>[Prev: ${ lastCharacter==='' ? 'no one' : lastCharacter.split(':')[0]}]<br></span>\n`);
+                    }
+                    fs.appendFileSync(newFileName, words+'\n\n');
+                }
+
+                lastCharacter = '';
+                lastCharacter = currentCharacter;
+            }
+
+            console.log(`Success: ${newFileName} is ready with ${count} moments.`);
+        } catch (err) {
+            console.error('Error writing files: ', err);
+        }
+    } else if (domTag === 'page_item') {
+        try {
+            fs.openSync('transcript-links.txt', 'w');
+            for (let i=1; i<collection.length; i++) {
+                var link = collection[i].querySelector('a').getAttribute('href');
+                console.log(link);
+                fs.appendFileSync('transcript-links.txt', link+'\n');
+            }
+        } catch (err) {
+            console.error('Error writing files: ', err);
+        }
+    }
 }
 
-//getPage('https://www.boards.ie/discussion/2058303621/broadband-switch-deals/p5');
-//getPage('https://www.boards.ie/discussion/2058303621/broadband-switch-deals/p6');
+function TBBT_GetAllTranscriptsFromFor(url, character) {
+    //getTBBTPage('https://bigbangtrans.wordpress.com/series-1-episode-1-pilot-episode/', 'MsoNormal', character);
 
-compareFiles('feargantae.txt', 'Glencarraig.txt');
+    fs.readFile('transcript-links.txt', 'utf8', (err, data) => {
+        if (err) {
+            console.error("Error reading the file:", err.message);
+            return;
+        }
+
+        const links = data.split(/\r?\n/)
+            .map(line => line.trim())
+            .filter(line => line.length > 0);
+
+        console.log(`Found ${links.length} links to process.`);
+
+        links.forEach((link) => {
+            getTBBTPage(link, 'MsoNormal', 'Howard:');
+            console.log('-----------------------------------');
+        });
+    });
+}
+
+
+// getPage('https://www.boards.ie/discussion/2058303621/broadband-switch-deals/p5');
+// getPage('https://www.boards.ie/discussion/2058303621/broadband-switch-deals/p6', 'postbit-wrapper');
+// compareFiles('feargantae.txt', 'Glencarraig.txt');
 // writeTextDifference('./collection.txt', './collection.txt');
+
+// getAllTranscriptsFromFor('https://bigbangtrans.wordpress.com/', 'Howard:');
+
+// getTBBTPage('https://bigbangtrans.wordpress.com/series-1-episode-1-pilot-episode/', 'MsoNormal', 'Howard:');
+// TBBT_GetAllTranscriptsFromFor('https://bigbangtrans.wordpress.com/', 'Howard:');
+TBBT_GetAllTranscriptsFromFor('https://bigbangtrans.wordpress.com/', 'Howard:');
