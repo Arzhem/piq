@@ -13,6 +13,8 @@
             text: "fast, minimal, engineered to disappear into your workflow."
         }
     ];
+
+    import logo from '$lib/assets/piq-logo.png';
 </script>
 
 <svelte:head>
@@ -22,7 +24,7 @@
 
 <main>
     <section class="hero">
-        <div class="brand">piq</div>
+        <img alt="piq" class="brand" src={logo} />
 
         <h1>
             know when things change.<br />
@@ -72,9 +74,11 @@
     }
 
     .brand {
-        font-size: 14px;
+        user-select: none
+    ;
+        height: 4rem;
         letter-spacing: 0.3em;
-        opacity: 0.6;
+        opacity: 1;
         margin-bottom: 24px;
         text-transform: lowercase;
     }

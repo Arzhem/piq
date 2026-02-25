@@ -7,11 +7,9 @@ import { JSDOM } from "jsdom";
  */
 export async function writeHTMLCollection(collection, writingFileName) {
     try {
-        // Map each element to its raw textContent and join them with a newline
-        // This preserves the internal \n and spaces of each element.
         const content = Array.from(collection)
             .map(item => item.textContent)
-            .join('\n');
+            .join(' ');
 
         if (content.trim().length < 4) {
             console.log('Response is too short or empty! Aborting...');
@@ -20,10 +18,10 @@ export async function writeHTMLCollection(collection, writingFileName) {
 
         if (fs.existsSync(writingFileName)) {
             console.log(`Warning: ${writingFileName} already exists. Left it unchanged.`);
-            return;
+            writingFileName = `${writingFileName + Math.floor(Math.random() * 1000)}.txt`;
         }
 
-        fs.writeFileSync(writingFileName, content, 'utf8');
+        fs.writeFileSync(writingFileName+'.txt', content, 'utf8');
         console.log(`Success: ${writingFileName} is ready.`);
     } catch (err) {
         console.error('Error writing files: ', err);

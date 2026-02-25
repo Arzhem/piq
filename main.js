@@ -1,15 +1,4 @@
-import {getPage} from './back-end/getPage';
-
-
-const db = require('mariadb');
-require('dotenv').config();
-const pool = db.createPool({host: '127.0.0.1', user: 'TestUser', connectionLimit: 5});
-const compare = require('dom-compare').compare;
-const jsdom = require("jsdom");
-const fs = require('fs');
-const diff = require('diff');
-const path = require("path");
-console.log("Make sure MariaDB is running\n");
+import {getPage} from './back-end/getPage.js'; // Added .js
 
 
 
@@ -59,7 +48,7 @@ async function getWebsiteHTML(url) {
 
 // getWebsiteHTML("https://twitchtracker.com/clips");
 
-// getPage('https://www.boards.ie/discussion/2058303621/broadband-switch-deals/p6', 'postbit-wrapper');
+getPage('https://www.boards.ie/discussion/2058303621/broadband-switch-deals/p6', 'postbit-wrapper');
 // getPage('https://www.boards.ie/discussion/2058303621/broadband-switch-deals/p7', 'postbit-wrapper');
 
 //compareFiles('undefined-p6.txt', 'undefined-p6i.txt');

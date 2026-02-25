@@ -1,6 +1,6 @@
 import fs from "fs";
-
-const jsdom = require("jsdom");
+import jsdom from "jsdom";
+import {writeHTMLCollection} from "./writeFile.js";
 
 export async function getPage(url, domTag) {
     // const url = "https://www.boards.ie/discussion/2058303621/broadband-switch-deals";
@@ -15,7 +15,7 @@ export async function getPage(url, domTag) {
         let domContent = mainWindow.getElementsByClassName(domTag);
         let urlTokens = url.split('/');
 
-        const writingFileName = `${urlTokens[urlTokens.length + 2]}-${urlTokens[urlTokens.length - 1]}.txt`; // fd up. what if you are fetching the landing page?
+        const writingFileName = `${urlTokens[urlTokens.length + 2]}-${urlTokens[urlTokens.length - 1]}`; // fd up. what if you are fetching the landing page?
         console.log(domContent);
         await writeHTMLCollection(domContent, writingFileName); // manually selecting DOM
     } catch (error) { console.log(error); }
@@ -23,7 +23,7 @@ export async function getPage(url, domTag) {
 
 export function getSanitizedContent(filePath) {
     return fs.readFileSync(filePath, 'utf8', (err) => {console.log('That file prolly doesn even exist, dude. Come on\n'); })
-        .split(/\r?\n/)           // Split by any newline type
+        .split(/\s+/)           // Split by any newline type
         .map(line => line.trim())  // Remove invisible leading/trailing whitespace
         .filter(line => line.length > 0) // Remove empty lines
         .join('\n');
