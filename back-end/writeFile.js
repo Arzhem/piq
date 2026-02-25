@@ -21,7 +21,7 @@ export async function writeHTMLCollection(collection, writingFileName) {
             writingFileName = `${writingFileName + Math.floor(Math.random() * 1000)}.txt`;
         }
 
-        fs.writeFileSync(writingFileName+'.txt', content, 'utf8');
+        fs.writeFileSync('test/'+writingFileName+'.txt', content, 'utf8');
         console.log(`Success: ${writingFileName} is ready.`);
     } catch (err) {
         console.error('Error writing files: ', err);
