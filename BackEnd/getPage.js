@@ -16,7 +16,6 @@ export async function getPage(url, domTag) {
         let urlTokens = url.split('/');
 
         const writingFileName = `${urlTokens[urlTokens.length + 2]}-${urlTokens[urlTokens.length - 1]}`; // fd up. what if you are fetching the landing page?
-        console.log(domContent);
         await writeHTMLCollection(domContent, writingFileName); // manually selecting DOM
     } catch (error) { console.log(error); }
 }
