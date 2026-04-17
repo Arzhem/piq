@@ -9,7 +9,7 @@ export async function writeHTMLCollection(collection, writingFileName) {
     try {
         const content = Array.from(collection)
             .map(item => item.textContent)
-            .join(' ');
+            .join('\n');
 
         if (content.trim().length < 4) {
             console.log('Response is too short or empty! Aborting...');
