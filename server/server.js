@@ -2,15 +2,14 @@ import express from 'express';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import crypto from 'crypto';
+import fs from 'fs/promises';   
 
 const app = express();
 app.use(express.json());
 
-// --- IN-MEMORY STORAGE (No Database for this Demo) ---
 let trackedTarget = null;
 
-// --- 1. THE FRONTEND UI ---
-// Serving a simple HTML page to test the flow
+// test ui
 app.get('/', (req, res) => {
     res.send(`
         <!DOCTYPE html>
@@ -51,7 +50,7 @@ app.get('/', (req, res) => {
                     const url = document.getElementById('urlInput').value;
                     logMsg("Fetching proxy for: " + url);
                     // Load the proxy route into the iframe
-                    document.getElementById('previewFrame').src = '/proxy?url=' + encodeURIComponent(url);
+                    document.getElementById('previewFrame').src = '/api/proxy?url=' + encodeURIComponent(url);
                 }
 
                 // Listen for messages from the Inspector injected into the iframe
@@ -83,7 +82,6 @@ app.get('/', (req, res) => {
     `);
 });
 
-// --- 2. THE PROXY & INJECTOR ---
 app.get('/api/proxy', async (req, res) => {
     const targetUrl = req.query.url;
     if (!targetUrl) return res.status(400).send("Missing URL");
@@ -92,87 +90,20 @@ app.get('/api/proxy', async (req, res) => {
         const response = await axios.get(targetUrl);
         const $ = cheerio.load(response.data);
 
-        // Inject Base Tag to fix styling
         $('head').prepend(`<base href="${targetUrl}">`);
 
-        // Inject the Mini-Inspector Script
-        const inspectorScript = `
-            <script>
-                document.addEventListener('DOMContentLoaded', () => {
-    // Remove any duplicate inspector elements from previous injections
-    document.querySelectorAll('#inspector-overlay:not(:last-of-type)').forEach(el => el.remove());
-    document.querySelectorAll('#inspector-controls:not(:last-of-type)').forEach(el => el.remove());
+        const scriptContent = await fs.readFile("./FrontEnd/inspector.js", "utf-8");
 
-    let isInspectorAlive = false;
-    const toggleButton = document.getElementById('inspector-toggle');
-    const overlay = document.getElementById('inspector-overlay');
-    const label = document.getElementById('inspector-label');
-    const pathDisplay = document.getElementById('node-path');
-    const controls = document.getElementById('inspector-controls');
-
-    if (!toggleButton) { console.error('Inspector: toggle button not found'); return; }
-
-    toggleButton.addEventListener('click', () => {
-        isInspectorAlive = !isInspectorAlive;
-        if (isInspectorAlive) {
-            toggleButton.textContent = "Disable Inspector";
-            toggleButton.classList.add('active');
-            pathDisplay.textContent = "Hover over an element...";
-            document.body.style.cursor = "pointer";
-        } else {
-            toggleButton.textContent = "Enable Inspector";
-            toggleButton.classList.remove('active');
-            pathDisplay.textContent = "Inspector is OFF";
-            document.body.style.cursor = "default";
-            overlay.style.display = 'none';
-        }
-    });
-
-    document.addEventListener('mousemove', (e) => {
-        if (!isInspectorAlive) return;
-        const target = e.target;
-        if (controls.contains(target) || target === overlay) return;
-        highlightElement(target);
-    });
-
-    function highlightElement(element) {
-        const rect = element.getBoundingClientRect();
-
-        overlay.style.display = 'block';
-        overlay.style.width = \`${rect.width}px\`;
-        overlay.style.height = \`${rect.height}px\`;
-        overlay.style.top = \`${rect.top + window.scrollY}px\`;
-        overlay.style.left = \`${rect.left + window.scrollX}px\`;
-
-        const tagName = element.tagName.toLowerCase();
-        const classes = element.className && typeof element.className === 'string'
-            ? '.' + element.className.trim().split(/\\s+/).join('.')
-            : '';
-
-        label.textContent = classes || tagName;
-        pathDisplay.textContent = \`${tagName}${classes}\`;
-    }
-
-    document.addEventListener('click', (e) => {
-        if (!isInspectorAlive || controls.contains(e.target)) return;
-        e.preventDefault();
-        e.stopPropagation();
-        alert(e.target.tagName);
-    }, true);
-});
-            </script>
+        const inspectorUI = `
+            <div id="inspector-overlay"><div id="inspector-label">div</div></div>
+            <div id="inspector-controls">
+                <button id="inspector-toggle">Enable Inspector</button>
+                <span id="node-path">Inspector is OFF</span>
+            </div>
+            <script>${scriptContent}</script>
         `;
-        const inspectorHTML = `<div id="inspector-overlay">
-    <div id="inspector-label">div</div>
-</div>
 
-<div id="inspector-controls">
-    <button id="inspector-toggle">Enable Inspector</button>
-    <span id="node-path">Inspector is OFF</span>
-</div>`;
-
-        $('body').prepend(inspectorHTML);
-        $('body').append(inspectorScript);
+        $('body').prepend(inspectorUI);
 
         res.send($.html());
     } catch (err) {
