@@ -1,13 +1,27 @@
+import 'dotenv/config';
+import mysql from 'mysql2/promise';
+import { URL } from 'url';
 import express from 'express';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import crypto from 'crypto';
-import fs from 'fs/promises';   
+import fs from 'fs/promises';
+import cors from 'cors';
 
 const app = express();
+app.use(cors());
 app.use(express.json());
 
 let trackedTarget = null;
+
+app.use('/assets', express.static('public'));
+
+const pool = mysql.createPool({
+    host: process.env.DB_HOST,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME,
+});
 
 // test ui
 app.get('/', (req, res) => {
@@ -82,25 +96,75 @@ app.get('/', (req, res) => {
     `);
 });
 
+// crud routes
+app.get('/api/sites', async (req, res) => {
+   const [rows] = await pool.query(
+       'SELECT * FROM sites ORDER BY created_at DESC'
+   );
+   res.json(rows);
+});
+
+app.post('/api/sites', async (req, res) => {
+   const { name, url, css_selector } = req.body;
+   const [result] = await poo.query(
+       'INSERT INTO sites (name, url, css_selector) VALUES (?, ?, ?)',
+       [name, url, css_selector]
+   );
+   res.json({
+       id: result.insertId
+   });
+});
+
+app.delete('/api/sites/:id', async (req, res) => {
+   await pool.query(
+       'DELETE FROM sites WHERE id = ?',
+       [req.params.id]
+   );
+   res.json({
+       success: true
+   });
+});
+
+app.get('/api/alerts', async (req, res) => {
+   const [rows] = await pool.query(
+       'SELECT alerts.*, sites.name FROM alerts JOIN site ON alerts.site_id = sites.id ORDER BY alerts.created_at DESC'
+   );
+   res.json(rows);
+});
+
+app.delete('/api/alerts', async (req, res) => {
+   await pool.query(
+       'TRUNCATE TABLE alerts'
+   );
+   res.json({ success: true });
+});
+
 app.get('/api/proxy', async (req, res) => {
     const targetUrl = req.query.url;
     if (!targetUrl) return res.status(400).send("Missing URL");
 
     try {
-        const response = await axios.get(targetUrl);
+        const response = await axios.get(targetUrl, {
+            timeout: 10000,
+            headers: {'User-Agent': 'piq/0.1'}
+        });
+
         const $ = cheerio.load(response.data);
 
-        $('head').prepend(`<base href="${targetUrl}">`);
-
-        const scriptContent = await fs.readFile("./FrontEnd/inspector.js", "utf-8");
+        const baseTag = `<base href="${targetUrl}">`;
+        if ($('head').length) $('head').prepend(baseTag);
+        else $('html').prepend(`<head>${baseTag}</head>`);
 
         const inspectorUI = `
+            <link rel="stylesheet" href="http://localhost:3000/assets/inspector.css">
+            
             <div id="inspector-overlay"><div id="inspector-label">div</div></div>
             <div id="inspector-controls">
                 <button id="inspector-toggle">Enable Inspector</button>
                 <span id="node-path">Inspector is OFF</span>
             </div>
-            <script>${scriptContent}</script>
+            
+            <script src="http://localhost:3000/assets/inspector.js"></script>
         `;
 
         $('body').prepend(inspectorUI);
@@ -111,19 +175,16 @@ app.get('/api/proxy', async (req, res) => {
     }
 });
 
-// --- 3. THE TRACKER SETUP ---
 app.post('/track', async (req, res) => {
     const { url, selector } = req.body;
 
     try {
-        // Fetch it once right now to get the baseline hash
         const response = await axios.get(url);
         const $ = cheerio.load(response.data);
         const textContent = $(selector).text().trim().replace(/\\s+/g, ' ');
 
         const hash = crypto.createHash('sha256').update(textContent).digest('hex');
 
-        // Save to memory
         trackedTarget = { url, selector, lastHash: hash, content: textContent };
 
         console.log(`[SYSTEM] Now tracking: ${selector} on ${url}`);
@@ -133,11 +194,10 @@ app.post('/track', async (req, res) => {
     }
 });
 
-// --- 4. THE BACKGROUND WORKER ---
 setInterval(async () => {
-    if (!trackedTarget) return; // Do nothing if no target is set
+    if (!trackedTarget) return;
 
-    console.log(`[WORKER] Checking ${trackedTarget.url}...`);
+    console.log(`Checking ${trackedTarget.url}...`);
     try {
         const response = await axios.get(trackedTarget.url);
         const $ = cheerio.load(response.data);
@@ -159,9 +219,8 @@ setInterval(async () => {
     } catch (err) {
         console.error("[WORKER ERROR]", err.message);
     }
-}, 5000); // Checks every 5 seconds for the demo
+}, 5000);
 
-// --- START ---
 app.listen(3000, () => {
     console.log("PoC Server running at http://localhost:3000");
 });
