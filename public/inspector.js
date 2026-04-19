@@ -1,61 +1,43 @@
-document.addEventListener('DOMContentLoaded', () => {
-    document.querySelectorAll('#inspector-overlay:not(:last-of-type)').forEach(el => el.remove());
-    document.querySelectorAll('#inspector-controls:not(:last-of-type)').forEach(el => el.remove());
-
-    let isInspectorAlive = false;
-    const toggleButton = document.getElementById('inspector-toggle');
+(function() {
     const overlay = document.getElementById('inspector-overlay');
     const label = document.getElementById('inspector-label');
-    const pathDisplay = document.getElementById('node-path');
-    const controls = document.getElementById('inspector-controls');
+    let isActive = true;
 
-    if (!toggleButton) { console.error('Inspector: toggle button not found'); return; }
-
-    toggleButton.addEventListener('click', () => {
-        isInspectorAlive = !isInspectorAlive;
-        if (isInspectorAlive) {
-            toggleButton.textContent = "Disable Inspector";
-            toggleButton.classList.add('active');
-            pathDisplay.textContent = "Hover over an element...";
-            document.body.style.cursor = "pointer";
-        } else {
-            toggleButton.textContent = "Enable Inspector";
-            toggleButton.classList.remove('active');
-            pathDisplay.textContent = "Inspector is OFF";
-            document.body.style.cursor = "default";
-            overlay.style.display = 'none';
-        }
-    });
-
-    document.addEventListener('mousemove', (e) => {
-        if (!isInspectorAlive) return;
+    document.addEventListener('mouseover', (e) => {
+        if (!isActive) return;
         const target = e.target;
-        if (controls.contains(target) || target === overlay) return;
-        highlightElement(target);
-    });
+        if (target.id === 'inspector-overlay' || target.id === 'inspector-label') return;
 
-    function highlightElement(element) {
-        const rect = element.getBoundingClientRect();
-
+        const rect = target.getBoundingClientRect();
         overlay.style.display = 'block';
-        overlay.style.width = `${rect.width}px`;
-        overlay.style.height = `${rect.height}px`;
-        overlay.style.top = `${rect.top + window.scrollY}px`;
-        overlay.style.left = `${rect.left + window.scrollX}px`;
+        overlay.style.width = rect.width + 'px';
+        overlay.style.height = rect.height + 'px';
+        overlay.style.top = (rect.top + window.scrollY) + 'px';
+        overlay.style.left = (rect.left + window.scrollX) + 'px';
 
-        const tagName = element.tagName.toLowerCase();
-        const classes = element.className && typeof element.className === 'string'
-            ? '.' + element.className.trim().split(/\s+/).join('.')
-            : '';
-
-        label.textContent = classes || tagName;
-        pathDisplay.textContent = `${tagName}${classes}`;
-    }
+        let path = target.tagName.toLowerCase();
+        if (target.id) path += '#' + target.id;
+        else if (target.className && typeof target.className === 'string') {
+            path += '.' + target.className.trim().split(/\s+/).join('.');
+        }
+        label.textContent = path;
+    });
 
     document.addEventListener('click', (e) => {
-        if (!isInspectorAlive || controls.contains(e.target)) return;
+        if (!isActive) return;
         e.preventDefault();
         e.stopPropagation();
-        alert(e.target.tagName);
+
+        let path = e.target.tagName.toLowerCase();
+        if (e.target.id) path += '#' + e.target.id;
+        else if (e.target.className && typeof e.target.className === 'string') {
+            path += '.' + e.target.className.trim().split(/\s+/).join('.');
+        }
+
+        // Send the selector back to Svelte
+        window.parent.postMessage({ type: 'SELECTOR_PICKED', selector: path }, '*');
+        isActive = false; // Turn off after click
+        overlay.style.display = 'none';
+        alert("Target Locked! You can now save it in the Dashboard.");
     }, true);
-});
+})();

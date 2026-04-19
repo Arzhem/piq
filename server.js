@@ -96,6 +96,8 @@ app.get('/', (req, res) => {
     `);
 });
 
+// TODO: SSRF middleware
+
 // crud routes
 app.get('/api/sites', async (req, res) => {
    const [rows] = await pool.query(
@@ -151,22 +153,13 @@ app.get('/api/proxy', async (req, res) => {
 
         const $ = cheerio.load(response.data);
 
-        const baseTag = `<base href="${targetUrl}">`;
-        if ($('head').length) $('head').prepend(baseTag);
-        else $('html').prepend(`<head>${baseTag}</head>`);
+        $('head').prepend(`<base href="${targetUrl}">`);
+        $('head').append(`<link rel="stylesheet" href="http://localhost:3000/assets/inspector.css">`)
 
         const inspectorUI = `
-            <link rel="stylesheet" href="http://localhost:3000/assets/inspector.css">
-            
-            <div id="inspector-overlay"><div id="inspector-label">div</div></div>
-            <div id="inspector-controls">
-                <button id="inspector-toggle">Enable Inspector</button>
-                <span id="node-path">Inspector is OFF</span>
-            </div>
-            
+            <div id="inspector-overlay"><div id="inspector-label"></div></div>
             <script src="http://localhost:3000/assets/inspector.js"></script>
         `;
-
         $('body').prepend(inspectorUI);
 
         res.send($.html());
@@ -199,27 +192,38 @@ setInterval(async () => {
 
     console.log(`Checking ${trackedTarget.url}...`);
     try {
-        const response = await axios.get(trackedTarget.url);
-        const $ = cheerio.load(response.data);
+        const [sites] = await pool.query('SELECT * FROM sites');
+        for (let site of sites) {
+            try {
+                const { data } = await axios.get(site.url, { timeout: 10000 });
+                const $ = cheerio.load(data);
+                const target = $(site.css_selector);
 
-        const textContent = $(trackedTarget.selector).text().trim().replace(/\\s+/g, ' ');
-        const currentHash = crypto.createHash('sha256').update(textContent).digest('hex');
+                if (!target.length) continue;
 
-        if (currentHash !== trackedTarget.lastHash) {
-            console.log(`\n!!! CHANGE DETECTED !!!`);
-            console.log(`Old Content: "${trackedTarget.content}"`);
-            console.log(`New Content: "${textContent}"\n`);
+                const textContent = target.text().trim().replace(/\s+/g, ' ');
+                const newHash = crypto.createHash('sha256').update(textContent).digest('hex');
 
-            // Update the baseline so we don't keep alerting
-            trackedTarget.lastHash = currentHash;
-            trackedTarget.content = textContent;
-        } else {
-            console.log(`[WORKER] No changes.`);
+                if (site.last_hash && newHash !== site.last_hash) {
+                    console.log(`Issue on ${site.name}`);
+                    await pool.query(
+                        'INSERT INTO alerts (site_id, captured_html) VALUES (?, ?)',
+                        [site.id, target.html()]
+                    );
+                }
+
+                await pool.query(
+                    'UPDATE sites SET last_hash = ? WHERE id = ?',
+                    [newHash, site.id]
+                );
+            } catch (err) {
+                console.error(`Skipping ${site.name}: ${err.message}`);
+            }
         }
     } catch (err) {
-        console.error("[WORKER ERROR]", err.message);
+        console.error("Worker error", err.message);
     }
-}, 5000);
+}, 10000);
 
 app.listen(3000, () => {
     console.log("PoC Server running at http://localhost:3000");
