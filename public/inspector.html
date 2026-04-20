@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mini DevTools Inspector</title>
+    <link rel="stylesheet" href="./inspector.css">
+</head>
+<body>
+
+<h1>DOM Inspector Demo</h1>
+<p>Click the <strong>"Enable Inspector"</strong> button below, then hover over any element.</p>
+
+<div class="container">
+    <div class="card">
+        <h2>Card Title</h2>
+        <p>This is a paragraph inside a card.</p>
+        <button onclick="alert('You clicked the button!')">Click Me</button>
+    </div>
+    <div class="card">
+        <h2>Another Card</h2>
+        <ul>
+            <li>List Item 1</li>
+            <li>List Item 2</li>
+            <li>List Item 3</li>
+        </ul>
+    </div>
+</div>
+
+<div id="inspector-overlay">
+    <div id="inspector-label">div</div>
+</div>
+
+<div id="inspector-controls">
+    <button id="inspector-toggle">Enable Inspector</button>
+    <span id="node-path">Inspector is OFF</span>
+</div>
+
+<script src="./inspector.js"></script>
+</body>
+</html>
