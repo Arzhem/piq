@@ -19,82 +19,22 @@ app.use('/assets', express.static('public'));
 const pool = mysql.createPool({
     host: process.env.DB_HOST,
     user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
+    password: process.env.DB_PASS,
     database: process.env.DB_NAME,
 });
 
-// test ui
-app.get('/', (req, res) => {
-    res.send(`
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Piq Prototype</title>
-            <style>
-                body { font-family: sans-serif; display: flex; flex-direction: column; height: 100vh; margin: 0; }
-                #header { padding: 20px; background: #2c3e50; color: white; }
-                #workspace { display: flex; flex: 1; overflow: hidden; }
-                #sidebar { width: 300px; padding: 20px; background: #ecf0f1; border-right: 2px solid #bdc3c7; }
-                iframe { flex: 1; border: none; }
-                button { padding: 8px 16px; background: #3498db; color: white; border: none; cursor: pointer; }
-                .log { background: #fff; padding: 10px; margin-top: 10px; border: 1px solid #ccc; height: 300px; overflow-y: auto; font-family: monospace; font-size: 12px; }
-            </style>
-        </head>
-        <body>
-            <div id="header">
-                <h2>Piq PoC: Fetch -> Inject -> Track</h2>
-                <input type="text" id="urlInput" value="https://example.com" size="50">
-                <button onclick="loadProxy()">1. Load & Inject</button>
-            </div>
-            <div id="workspace">
-                <div id="sidebar">
-                    <h3>Status</h3>
-                    <p id="targetStatus">No target selected.</p>
-                    <div id="logs" class="log">Waiting for action...<br></div>
-                </div>
-                <!-- The iframe where we load the proxied site -->
-                <iframe id="previewFrame"></iframe>
-            </div>
-
-            <script>
-                const logs = document.getElementById('logs');
-                function logMsg(msg) { logs.innerHTML += msg + '<br>'; logs.scrollTop = logs.scrollHeight; }
-
-                function loadProxy() {
-                    const url = document.getElementById('urlInput').value;
-                    logMsg("Fetching proxy for: " + url);
-                    // Load the proxy route into the iframe
-                    document.getElementById('previewFrame').src = '/api/proxy?url=' + encodeURIComponent(url);
-                }
-
-                // Listen for messages from the Inspector injected into the iframe
-                window.addEventListener('message', async (event) => {
-                    if (event.data.type === 'SELECTOR_PICKED') {
-                        const selector = event.data.selector;
-                        const url = document.getElementById('urlInput').value;
-                        
-                        logMsg("2. Received Selector: <span style='color:blue'>" + selector + "</span>");
-                        logMsg("3. Sending to tracking engine...");
-
-                        // Send to our backend
-                        const res = await fetch('/track', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ url, selector })
-                        });
-                        const data = await res.json();
-                        
-                        document.getElementById('targetStatus').innerHTML = 
-                            "<b>Tracking:</b><br>" + url + "<br><b>Selector:</b><br>" + selector;
-                        
-                        logMsg("Target locked. Baseline Hash: " + data.hash.substring(0, 10) + "...");
-                    }
-                });
-            </script>
-        </body>
-        </html>
-    `);
-});
+// just for testing: ensuring the connection works
+async function initDB() {
+    try {
+        const connection = await pool.getConnection();
+        await connection.query('SELECT 1');
+        connection.release();
+        console.log('DB Connected!');
+    } catch (err) {
+        console.error('DB connection failed:', err);
+        process.exit(1);
+    }
+}
 
 // TODO: SSRF middleware
 
@@ -129,7 +69,7 @@ app.delete('/api/sites/:id', async (req, res) => {
 
 app.get('/api/alerts', async (req, res) => {
    const [rows] = await pool.query(
-       'SELECT alerts.*, sites.name FROM alerts JOIN site ON alerts.site_id = sites.id ORDER BY alerts.created_at DESC'
+       'SELECT alerts.*, sites.name FROM alerts JOIN sites ON alerts.site_id = sites.id ORDER BY alerts.created_at DESC'
    );
    res.json(rows);
 });
@@ -142,10 +82,15 @@ app.delete('/api/alerts', async (req, res) => {
 });
 
 app.get('/api/proxy', async (req, res) => {
-    const targetUrl = req.query.url;
+    let targetUrl = req.query.url;
     if (!targetUrl) return res.status(400).send("Missing URL");
 
     try {
+        if(!targetUrl.includes('http')) {
+            targetUrl = "https://" + targetUrl; // what if its http? and targetUrl not being const?
+            console.log(`Corrected url to ${targetUrl}`);
+        }
+
         const response = await axios.get(targetUrl, {
             timeout: 10000,
             headers: {'User-Agent': 'piq/0.1'}
@@ -168,6 +113,7 @@ app.get('/api/proxy', async (req, res) => {
     }
 });
 
+/*
 app.post('/track', async (req, res) => {
     const { url, selector } = req.body;
 
@@ -186,6 +132,7 @@ app.post('/track', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+*/
 
 setInterval(async () => {
     if (!trackedTarget) return;
@@ -225,6 +172,7 @@ setInterval(async () => {
     }
 }, 10000);
 
+await initDB();
 app.listen(3000, () => {
     console.log("PoC Server running at http://localhost:3000");
 });
