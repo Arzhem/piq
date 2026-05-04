@@ -9,11 +9,10 @@
         if (target.id === 'inspector-overlay' || target.id === 'inspector-label') return;
 
         const rect = target.getBoundingClientRect();
-        overlay.style.display = 'block';
-        overlay.style.width = rect.width + 'px';
-        overlay.style.height = rect.height + 'px';
         overlay.style.top = (rect.top + window.scrollY) + 'px';
         overlay.style.left = (rect.left + window.scrollX) + 'px';
+        overlay.style.width = rect.width + 'px';
+        overlay.style.height = rect.height + 'px';
 
         let path = target.tagName.toLowerCase();
         if (target.id) path += '#' + target.id;
@@ -36,7 +35,7 @@
 
         // Send the selector back to Svelte
         window.parent.postMessage({ type: 'SELECTOR_PICKED', selector: path }, '*');
-        isActive = false; // Turn off after click
+        isActive = false;
         overlay.style.display = 'none';
         alert("Target Locked! You can now save it in the Dashboard.");
     }, true);
