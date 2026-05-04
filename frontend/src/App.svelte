@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import piq_logo from './assets/avatar.jpg';
+  import piq_logo from './assets/piq-logo.png'
 
   const API_BASE = '/api'; // for single server routing
 
@@ -21,11 +21,17 @@
     fetchSites();
     fetchAlerts();
 
+    const pollInterval = setInterval(() => {
+      fetchAlerts();
+    }, 5000);
+
     window.addEventListener('message', (event) => {
       if (event.data.type === 'SELECTOR_PICKED') {
         selectedSelector = event.data.selector;
       }
     });
+
+    return () => clearInterval(pollInterval);
   });
 
   async function fetchSites() {
@@ -113,7 +119,7 @@
             <div>
               <strong>{site.name}</strong> <br><small>{site.url}</small>
             </div>
-            <button class="delete-btn" on:click={() => deleteTarget(site.id)}>[X]</button>
+            <button class="delete-btn" on:click={() => deleteTarget(site.id)}> X </button>
           </li>
         {/each}
       </ul>
@@ -175,6 +181,8 @@
     color: var(--text-main);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   }
+
+  img { width: 15%; }
 
   h1, h2 { font-weight: 700; margin-top: 0; letter-spacing: -0.5px; }
   h1 { margin: 0; }

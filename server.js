@@ -75,8 +75,13 @@ async function ssrfProtect(req, res, next) {
 }
 
 app.get('/api/sites', async (req, res) => {
-    const [rows] = await pool.query('SELECT * FROM sites ORDER BY created_at DESC');
-    res.json(rows);
+    try {
+        const [rows] = await pool.query('SELECT * FROM sites ORDER BY created_at DESC');
+        res.json(rows);
+    } catch (err) {
+        console.error("GET /api/sites Error:", err.message);
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.post('/api/sites', ssrfProtect, async (req, res) => {
@@ -100,10 +105,15 @@ app.delete('/api/sites/:id', async (req, res) => {
 });
 
 app.get('/api/alerts', async (req, res) => {
-    const [rows] = await pool.query(
-        'SELECT alerts.*, sites.name FROM alerts JOIN sites ON alerts.site_id = sites.id ORDER BY alerts.created_at DESC'
-    );
-    res.json(rows);
+    try {
+        const [rows] = await pool.query(
+            'SELECT alerts.*, sites.name FROM alerts JOIN sites ON alerts.site_id = sites.id ORDER BY alerts.created_at DESC'
+        );
+        res.json(rows);
+    } catch (err) {
+        console.error("GET /api/alerts Error:", err.message);
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.patch('/api/alerts/:id/read', async (req, res) => {
@@ -129,11 +139,12 @@ app.get('/api/proxy', ssrfProtect, async (req, res) => {
         const $ = cheerio.load(response.data);
 
         $('head').prepend(`<base href="${targetUrl}">`);
-        $('head').append(`<link rel="stylesheet" href="/assets/inspector.css">`);
+        // Force absolute paths so they ignore the <base> tag
+        $('head').append(`<link rel="stylesheet" href="http://localhost:3000/assets/inspector.css">`);
 
         const inspectorUI = `
             <div id="inspector-overlay"><div id="inspector-label"></div></div>
-            <script src="/assets/inspector.js"></script>
+            <script src="http://localhost:3000/assets/inspector.js"></script>
         `;
         $('body').prepend(inspectorUI);
 
