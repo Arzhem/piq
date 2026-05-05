@@ -50,6 +50,14 @@
     selectedSelector = '';
   }
 
+  function pickAgain() {
+    selectedSelector = '';
+    // Force iframe remount to reset the inspector.js event listeners
+    const tempUrl = proxyUrl;
+    proxyUrl = '';
+    setTimeout(() => proxyUrl = tempUrl, 10);
+  }
+
   async function saveTarget() {
     if (!siteName || !targetUrl || !selectedSelector) return;
     const res = await fetch(`${API_BASE}/sites`, {
@@ -66,6 +74,15 @@
     await fetch(`${API_BASE}/sites/${id}`, { method: 'DELETE' });
     fetchSites();
     fetchAlerts();
+  }
+
+  async function toggleFreeze(id, currentState) {
+    await fetch(`${API_BASE}/sites/${id}/freeze`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ is_frozen: !currentState })
+    });
+    fetchSites();
   }
 
   async function markAsRead(id) {
@@ -96,8 +113,8 @@
 
       <div class="iframe-container {isFullscreen ? 'fullscreen' : ''}">
         <div class="iframe-controls">
-          <button on:click={() => isFullscreen = !isFullscreen}>
-            {isFullscreen ? 'EXIT FULLSCREEN' : 'FULLSCREEN'}
+          <button class="ghost-btn" on:click={() => isFullscreen = !isFullscreen}>
+            {isFullscreen ? 'MINIMIZE' : 'EXPAND'}
           </button>
         </div>
         {#if proxyUrl}
@@ -108,18 +125,30 @@
       </div>
 
       <h2>02. COMMIT NODE</h2>
-      <p>Element: <strong>{selectedSelector || 'NULL'}</strong></p>
+      <div class="commit-header">
+        <p>Element: <strong>{selectedSelector || 'NULL'}</strong></p>
+        {#if selectedSelector}
+          <button class="ghost-btn warning-btn" on:click={pickAgain}>PICK AGAIN</button>
+        {/if}
+      </div>
       <input type="text" bind:value={siteName} placeholder="Reference Name" />
       <button on:click={saveTarget} disabled={!selectedSelector}>START TRACKING</button>
 
       <h2 style="margin-top: 2rem;">ACTIVE NODES</h2>
       <ul class="node-list">
         {#each sites as site}
-          <li>
-            <div>
-              <strong>{site.name}</strong> <br><small>{site.url}</small>
+          <li class={site.is_frozen ? 'frozen-node' : ''}>
+            <div class="node-info">
+              <strong>{site.name}</strong>
+              {#if site.is_frozen}<span class="badge frozen-badge">FROZEN</span>{/if}
+              <br><small>{site.url}</small>
             </div>
-            <button class="delete-btn" on:click={() => deleteTarget(site.id)}> X </button>
+            <div class="node-actions">
+              <button class="ghost-btn" on:click={() => toggleFreeze(site.id, site.is_frozen)}>
+                {site.is_frozen ? 'UNFREEZE' : 'FREEZE'}
+              </button>
+              <button class="delete-btn" on:click={() => deleteTarget(site.id)}> X </button>
+            </div>
           </li>
         {/each}
       </ul>
@@ -211,30 +240,50 @@
   .controls input { flex: 1; }
   .controls button { width: auto; }
 
-  .iframe-container { height: 400px; border: 1px dashed var(--border-color); border-radius: 8px; position: relative; margin: 1.5rem 0; background: #000; }
-  iframe { width: 100%; height: 100%; border: none; border-radius: 8px; }
+  .iframe-container { height: 400px; border: 1px dashed var(--border-color); border-radius: 8px; position: relative; margin: 1.5rem 0; background: #000; transition: all 0.3s ease; }
+  iframe { width: 100%; height: 100%; border: none; border-radius: 8px; background: #fff;}
   .placeholder { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: var(--text-muted); font-family: monospace; }
 
+  /* Windowed Fullscreen Fix */
   .iframe-container.fullscreen {
-    position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 9999; margin: 0; border: none; border-radius: 0;
+    position: fixed;
+    top: 3vh;
+    left: 3vw;
+    width: 94vw;
+    height: 94vh;
+    z-index: 9999;
+    margin: 0;
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    box-shadow: 0 0 0 100vmax rgba(0,0,0,0.85), 0 20px 50px rgba(0,0,0,0.5);
   }
+
   .iframe-controls { position: absolute; top: 10px; right: 10px; z-index: 10000; }
-  .iframe-controls button { padding: 0.5rem 1rem; min-height: auto; width: auto; }
+  .iframe-controls button { padding: 0.5rem 1rem; min-height: auto; width: auto; background: rgba(0,0,0,0.7); color: white; border: 1px solid var(--border-color); }
+
+  .commit-header { display: flex; justify-content: space-between; align-items: center; }
 
   .node-list { list-style: none; padding: 0; margin: 0; }
-  .node-list li { display: flex; justify-content: space-between; align-items: center; padding: 1rem; border: 1px solid var(--border-color); margin-bottom: 0.5rem; border-radius: 6px; background: var(--bg-main); }
+  .node-list li { display: flex; justify-content: space-between; align-items: center; padding: 1rem; border: 1px solid var(--border-color); margin-bottom: 0.5rem; border-radius: 6px; background: var(--bg-main); transition: opacity 0.3s ease; }
+  .node-list li.frozen-node { opacity: 0.5; border-style: dashed; }
+  .node-info { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+  .node-actions { display: flex; gap: 0.5rem; }
+
   .delete-btn { background: transparent; border: 1px solid #ff4444; color: #ff4444; width: auto; padding: 0.5rem; }
 
   .feed-panel { background: transparent; border: none; padding: 0; }
   .feed-header { display: flex; justify-content: space-between; align-items: center; padding-bottom: 1.5rem; border-bottom: 1px solid var(--border-color); margin-bottom: 2rem; }
 
   .ghost-btn { background: transparent; color: var(--text-muted); border: 1px solid var(--border-color); font-size: 0.8rem; width: auto; padding: 0.5rem 1rem; }
+  .ghost-btn:hover { background: var(--bg-card); color: var(--text-main); }
   .ghost-btn.danger { color: #ff4444; border-color: rgba(255,68,68,0.3); }
+  .ghost-btn.warning-btn { color: #ffaa00; border-color: rgba(255,170,0,0.3); margin: 0; }
 
   .alerts-list { display: flex; flex-direction: column; gap: 2rem; }
   .media-card { background: var(--bg-card); border-radius: 12px; overflow: hidden; border: 1px solid var(--border-color); }
   .card-header { display: flex; justify-content: space-between; align-items: center; padding: 1rem 1.5rem; border-bottom: 1px solid var(--border-color); }
   .badge { font-family: monospace; background: #2a2a2a; padding: 4px 8px; border-radius: 4px; font-size: 0.85rem; }
+  .frozen-badge { background: rgba(0, 102, 255, 0.2); color: #0066ff; margin-left: 0.5rem; }
   .timestamp { color: var(--text-muted); font-size: 0.85rem; }
 
   .card-content { padding: 0; background: #000; display: flex; justify-content: center; align-items: center; min-height: 100px; overflow: hidden; }
@@ -250,5 +299,6 @@
   @media (max-width: 768px) {
     .grid { grid-template-columns: 1fr; padding: 1rem; }
     .controls { flex-direction: column; }
+    .iframe-container.fullscreen { width: 100vw; height: 100vh; top: 0; left: 0; border-radius: 0; }
   }
 </style>

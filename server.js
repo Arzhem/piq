@@ -147,7 +147,7 @@ app.get('/api/proxy', ssrfProtect, async (req, res) => {
         });
 
 
-        // I don't use /assets on purpose. <base> can interfere and mess things up
+        // Don't use /assets on purpose - <base> can interfere and mess things up.
         const inspectorCSS = await fs.readFile(path.join(__dirname, 'public/inspector.css'), 'utf-8');
         const inspectorJS = await fs.readFile(path.join(__dirname, 'public/inspector.js'), 'utf-8');
 
@@ -169,6 +169,17 @@ app.get('/api/proxy', ssrfProtect, async (req, res) => {
     }
 });
 
+app.patch('/api/sites/:id/freeze', async (req, res) => {
+    try {
+        const { is_frozen } = req.body;
+        await pool.query('UPDATE sites SET is_frozen = ? WHERE id = ?', [is_frozen, req.params.id]);
+        res.json({ success: true });
+    } catch (err) {
+        console.error("PATCH /api/sites/freeze Error:", err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 async function runWorker() {
     console.log("Checking active nodes...");
     try {
@@ -187,8 +198,22 @@ async function runWorker() {
                 const target = $(site.css_selector);
 
                 if (!target.length) continue;
+                if (site.is_frozen) continue;
 
                 target.find('script, style, noscript, iframe, time, [type="hidden"], .ad-container').remove();
+
+                // the following part is because of sites like google.com/finance
+                const allowedAttributes  = ['src', 'href', 'alt', 'poster'];
+
+                target.find('*').addBack().each((i, el) => {
+                   if (el.attribs) {
+                       Object.keys(el.attribs).forEach(key => {
+                           if (!allowedAttributes.includes(key)) {
+                               $(el).removeAttr(key);
+                           }
+                       });
+                   }
+                });
 
                 const htmlContent = $.html(target).trim().replace(/\s+/g, ' ');
                 const newHash = crypto.createHash('sha256').update(htmlContent).digest('hex');
