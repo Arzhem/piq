@@ -1,4 +1,3 @@
-/* --- General Page Styling (The Content) --- */
 body {
     font-family: 'Segoe UI', sans-serif;
     padding: 20px;
@@ -34,9 +33,6 @@ button {
 
 button:hover { background-color: #2980b9; }
 
-/* --- THE INSPECTOR UI (The Tool) --- */
-
-/* The floating toolbar at the bottom */
 #inspector-controls {
     position: fixed;
     bottom: 20px;
@@ -50,7 +46,7 @@ button:hover { background-color: #2980b9; }
     display: flex;
     align-items: center;
     gap: 15px;
-    z-index: 10000; /* Must be on top of everything */
+    z-index: 10000;
 }
 
 #inspector-toggle {
@@ -68,17 +64,15 @@ button:hover { background-color: #2980b9; }
     color: #aaa;
 }
 
-/* The Blue Overlay Box */
 #inspector-overlay {
-    position: fixed; /* Fixed relative to viewport */
-    border: 2px solid #3498db; /* The blue border */
-    background-color: rgba(52, 152, 219, 0.3); /* The semi-transparent blue fill */
-    pointer-events: none; /* CRITICAL: Allows mouse to click 'through' the overlay */
+    position: fixed;
+    border: 2px solid #3498db;
+    background-color: rgba(52, 152, 219, 0.3);
+    pointer-events: none;
     z-index: 9999;
-    display: none; /* Hidden by default */
-    transition: all 0.1s ease-out; /* Smooth movement */
+    /* display: none; */
+    transition: all 0.1s ease-out;
 
-    /* Label tag above the box */
     box-sizing: border-box;
 }
 

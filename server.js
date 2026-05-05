@@ -10,6 +10,7 @@ import crypto from 'crypto';
 import cors from 'cors';
 import dns from 'dns';
 import { promisify } from 'util';
+import fs from "fs/promises";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -130,21 +131,35 @@ app.get('/api/proxy', ssrfProtect, async (req, res) => {
     let targetUrl = req.query.url;
     if (!targetUrl) return res.status(400).send("Missing URL");
 
+    if (!targetUrl.includes('http')) {
+        targetUrl = "https://" + targetUrl;
+        console.log(`Corrected url to ${targetUrl}`);
+    }
+
     try {
         const response = await axios.get(targetUrl, {
-            timeout: 10000,
-            headers: {'User-Agent': 'piq/0.1'}
+            timeout: 15000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5'
+            }
         });
+
+
+        // I don't use /assets on purpose. <base> can interfere and mess things up
+        const inspectorCSS = await fs.readFile(path.join(__dirname, 'public/inspector.css'), 'utf-8');
+        const inspectorJS = await fs.readFile(path.join(__dirname, 'public/inspector.js'), 'utf-8');
 
         const $ = cheerio.load(response.data);
 
         $('head').prepend(`<base href="${targetUrl}">`);
         // Force absolute paths so they ignore the <base> tag
-        $('head').append(`<link rel="stylesheet" href="http://localhost:3000/assets/inspector.css">`);
+        $('head').append(`<style id="piq-inspector-styles">${inspectorCSS}</style>`);
 
         const inspectorUI = `
             <div id="inspector-overlay"><div id="inspector-label"></div></div>
-            <script src="http://localhost:3000/assets/inspector.js"></script>
+            <script id="piq-inspector-script">${inspectorJS}</script>
         `;
         $('body').prepend(inspectorUI);
 
@@ -160,7 +175,14 @@ async function runWorker() {
         const [sites] = await pool.query('SELECT * FROM sites');
         for (let site of sites) {
             try {
-                const { data } = await axios.get(site.url, { timeout: 10000 });
+                const { data } = await axios.get(site.url, {
+                    timeout: 15000,
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.5'
+                    }
+                });
                 const $ = cheerio.load(data);
                 const target = $(site.css_selector);
 

@@ -9,6 +9,7 @@
         if (target.id === 'inspector-overlay' || target.id === 'inspector-label') return;
 
         const rect = target.getBoundingClientRect();
+        overlay.style.display = 'block';
         overlay.style.top = (rect.top + window.scrollY) + 'px';
         overlay.style.left = (rect.left + window.scrollX) + 'px';
         overlay.style.width = rect.width + 'px';
