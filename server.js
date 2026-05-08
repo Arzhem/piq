@@ -1,4 +1,3 @@
-
 import 'dotenv/config';
 import mysql from 'mysql2/promise';
 import { URL, fileURLToPath } from 'url';
@@ -200,29 +199,54 @@ async function runWorker() {
                 if (!target.length) continue;
                 if (site.is_frozen) continue;
 
-                target.find('script, style, noscript, iframe, time, [type="hidden"], .ad-container').remove();
 
-                // the following part is because of sites like google.com/finance
-                const allowedAttributes  = ['src', 'href', 'alt', 'poster'];
+                const $cleaner = cheerio.load(target.html());
+                $cleaner('script, style, noscript, svg, path, meta, link, [style*="display: none"], [style*="display:none"], [aria-hidden="true"]').remove();
+                let textValue = $cleaner.root().text().replace(/\s+/g, ' ').trim();
 
-                target.find('*').addBack().each((i, el) => {
-                   if (el.attribs) {
-                       Object.keys(el.attribs).forEach(key => {
-                           if (!allowedAttributes.includes(key)) {
-                               $(el).removeAttr(key);
-                           }
-                       });
-                   }
-                });
+                let mediaHashString = "";
+                const mediaElements = target.find('img, video source, audio source').addBack('img, video source, audio source').toArray();
 
-                const htmlContent = $.html(target).trim().replace(/\s+/g, ' ');
-                const newHash = crypto.createHash('sha256').update(htmlContent).digest('hex');
+                for (let el of mediaElements) {
+                    if (el.attribs && el.attribs.src) {
+                        // ensuring the URL is absolute
+                        const absoluteMediaUrl = new URL(el.attribs.src, site.url).href;
+
+                        try {
+                            // downloading the actual file data
+                            const mediaRes = await axios.get(absoluteMediaUrl, {
+                                responseType: 'arraybuffer', // pure binary data
+                                timeout: 5000
+                            });
+
+                            const fileHash = crypto.createHash('md5').update(mediaRes.data).digest('hex');
+                            mediaHashString += `|BIN:${fileHash}`;
+                        } catch (e) {
+                            // fallback if download fails
+                            mediaHashString += `|URL:${absoluteMediaUrl}`;
+                        }
+                    }
+                }
+
+                const contentToHash = textValue + mediaHashString;
+                const newHash = crypto.createHash('sha256').update(contentToHash).digest('hex');
 
                 if (site.last_hash && newHash !== site.last_hash) {
-                    console.log(`Issue on ${site.name}`);
+                    console.log(`Change detected on ${site.name}`);
+
+                    // converting relative paths to absolute
+                    target.find('[src]').addBack('[src]').each((i, el) => {
+                        if (el.attribs.src) el.attribs.src = new URL(el.attribs.src, site.url).href;
+                    });
+                    target.find('[href]').addBack('[href]').each((i, el) => {
+                        if (el.attribs.href) el.attribs.href = new URL(el.attribs.href, site.url).href;
+                    });
+
+                    const feedHtml = $.html(target);
+
                     await pool.query(
                         'INSERT INTO alerts (site_id, captured_html) VALUES (?, ?)',
-                        [site.id, target.html()]
+                        [site.id, feedHtml]
                     );
                 }
 
@@ -247,7 +271,7 @@ app.use((req, res) => {
     } else {
         res.status(404).json({ error: "Not found" });
     }
-}); // Express 5 just has issues with the '*' route.
+});
 
 await initDB();
 app.listen(3000, () => {
