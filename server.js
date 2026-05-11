@@ -107,8 +107,7 @@ app.delete('/api/sites/:id', async (req, res) => {
 app.get('/api/alerts', async (req, res) => {
     try {
         const [rows] = await pool.query(
-            'SELECT alerts.*, sites.name FROM alerts JOIN sites ON alerts.site_id = sites.id ORDER BY alerts.created_at DESC'
-        );
+            'SELECT alerts.*, sites.name, sites.url FROM alerts JOIN sites ON alerts.site_id = sites.id ORDER BY alerts.created_at DESC'        );
         res.json(rows);
     } catch (err) {
         console.error("GET /api/alerts Error:", err.message);
@@ -124,6 +123,15 @@ app.patch('/api/alerts/:id/read', async (req, res) => {
 app.delete('/api/alerts', async (req, res) => {
     await pool.query('TRUNCATE TABLE alerts');
     res.json({ success: true });
+});
+
+app.delete('/api/alerts/:id', async (req, res) => {
+    try {
+        await pool.query('DELETE FROM alerts WHERE id = ?', [req.params.id]);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.get('/api/proxy', ssrfProtect, async (req, res) => {
@@ -180,7 +188,8 @@ app.patch('/api/sites/:id/freeze', async (req, res) => {
 });
 
 async function runWorker() {
-    console.log("Checking active nodes...");
+    // console.log("Checking active nodes...");
+    process.stdout.write(". ");
     try {
         const [sites] = await pool.query('SELECT * FROM sites');
         for (let site of sites) {
