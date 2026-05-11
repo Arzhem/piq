@@ -10,6 +10,8 @@ import cors from 'cors';
 import dns from 'dns';
 import { promisify } from 'util';
 import fs from "fs/promises";
+import bcrypt from 'bcrypt';
+import jwt from 'jsonwebtoken';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -21,6 +23,7 @@ app.use(express.json());
 app.use('/assets', express.static('public'));
 
 const lookupAsync = promisify(dns.lookup);
+const JWT_SECRET = process.env.JWT_SECRET;
 
 const pool = mysql.createPool({
     host: process.env.DB_HOST,
@@ -51,10 +54,7 @@ async function ssrfProtect(req, res, next) {
     if (!targetUrl) return next();
 
     try {
-        if(!targetUrl.startsWith('http')) {
-            targetUrl = "https://" + targetUrl;
-        }
-
+        if(!targetUrl.startsWith('http')) targetUrl = "https://" + targetUrl;
         const parsedUrl = new URL(targetUrl);
 
         if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
@@ -64,84 +64,127 @@ async function ssrfProtect(req, res, next) {
         const { address } = await lookupAsync(parsedUrl.hostname);
 
         if (isPrivateIP(address)) {
-            console.warn(`Blocked SSRF attempt to internal IP: ${address} (${parsedUrl.hostname})`);
-            return res.status(403).json({ error: 'SSRF Blocked: Access to internal networks is forbidden.' });
+            console.warn(`Blocked SSRF attempt to internal IP: ${address}`);
+            return res.status(403).json({ error: 'SSRF Blocked: Internal networks forbidden.' });
         }
-
         next();
     } catch (err) {
         return res.status(400).json({ error: 'Invalid URL or unresolvable hostname.' });
     }
 }
 
-app.get('/api/sites', async (req, res) => {
+function authenticateToken(req, res, next) {
+    const authHeader = req.headers['authorization'];
+
+    // Look for the token in the header FIRST, but fall back to the query string for iframes
+    const token = (authHeader && authHeader.split(' ')[1]) || req.query.token;
+
+    if (!token) return res.status(401).json({ error: "Access denied" });
+
+    jwt.verify(token, JWT_SECRET, (err, user) => {
+        if (err) return res.status(403).json({ error: "Invalid token" });
+        req.user = user;
+        next();
+    });
+}
+
+app.post('/api/register', async (req, res) => {
     try {
-        const [rows] = await pool.query('SELECT * FROM sites ORDER BY created_at DESC');
-        res.json(rows);
+        const { username, password } = req.body;
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const [result] = await pool.query('INSERT INTO users (username, password_hash) VALUES (?, ?)', [username, hashedPassword]);
+        res.json({ success: true, userId: result.insertId });
     } catch (err) {
-        console.error("GET /api/sites Error:", err.message);
+        res.status(400).json({ error: 'Username may already exist.' });
+    }
+});
+
+app.post('/api/login', async (req, res) => {
+    const { username, password } = req.body;
+    try {
+        const [rows] = await pool.query('SELECT * FROM users WHERE username = ?', [username]);
+        const user = rows[0];
+
+        if (user && await bcrypt.compare(password, user.password_hash)) {
+            const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
+            res.json({ token, username: user.username });
+        } else {
+            res.status(401).json({ error: 'Invalid credentials' });
+        }
+    } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-app.post('/api/sites', ssrfProtect, async (req, res) => {
-    let { name, url, css_selector } = req.body;
-
-    if (!url.includes('http')) {
-        url = "https://" + url;
-        console.log(`Corrected url to ${url}`);
+app.get('/api/sites', authenticateToken, async (req, res) => {
+    try {
+        const [rows] = await pool.query('SELECT * FROM sites WHERE user_id = ? ORDER BY created_at DESC', [req.user.id]);
+        res.json(rows);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
+});
+
+app.post('/api/sites', authenticateToken, ssrfProtect, async (req, res) => {
+    let { name, url, css_selector } = req.body;
+    if (!url.includes('http')) url = "https://" + url;
 
     const [result] = await pool.query(
-        'INSERT INTO sites (name, url, css_selector) VALUES (?, ?, ?)',
-        [name, url, css_selector]
+        'INSERT INTO sites (user_id, name, url, css_selector) VALUES (?, ?, ?, ?)',
+        [req.user.id, name, url, css_selector]
     );
     res.json({ id: result.insertId });
 });
 
-app.delete('/api/sites/:id', async (req, res) => {
-    await pool.query('DELETE FROM sites WHERE id = ?', [req.params.id]);
+app.delete('/api/sites/:id', authenticateToken, async (req, res) => {
+    await pool.query('DELETE FROM sites WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
     res.json({ success: true });
 });
 
-app.get('/api/alerts', async (req, res) => {
+app.patch('/api/sites/:id/freeze', authenticateToken, async (req, res) => {
     try {
-        const [rows] = await pool.query(
-            'SELECT alerts.*, sites.name, sites.url FROM alerts JOIN sites ON alerts.site_id = sites.id ORDER BY alerts.created_at DESC'        );
-        res.json(rows);
-    } catch (err) {
-        console.error("GET /api/alerts Error:", err.message);
-        res.status(500).json({ error: err.message });
-    }
-});
-
-app.patch('/api/alerts/:id/read', async (req, res) => {
-    await pool.query('UPDATE alerts SET is_read = TRUE WHERE id = ?', [req.params.id]);
-    res.json({ success: true });
-});
-
-app.delete('/api/alerts', async (req, res) => {
-    await pool.query('TRUNCATE TABLE alerts');
-    res.json({ success: true });
-});
-
-app.delete('/api/alerts/:id', async (req, res) => {
-    try {
-        await pool.query('DELETE FROM alerts WHERE id = ?', [req.params.id]);
+        const { is_frozen } = req.body;
+        await pool.query('UPDATE sites SET is_frozen = ? WHERE id = ? AND user_id = ?', [is_frozen, req.params.id, req.user.id]);
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-app.get('/api/proxy', ssrfProtect, async (req, res) => {
+app.get('/api/alerts', authenticateToken, async (req, res) => {
+    try {
+        const [rows] = await pool.query(
+            'SELECT alerts.*, sites.name, sites.url FROM alerts JOIN sites ON alerts.site_id = sites.id WHERE sites.user_id = ? ORDER BY alerts.created_at DESC',
+            [req.user.id]
+        );
+        res.json(rows);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.patch('/api/alerts/:id/read', authenticateToken, async (req, res) => {
+    await pool.query(
+        'UPDATE alerts JOIN sites ON alerts.site_id = sites.id SET alerts.is_read = TRUE WHERE alerts.id = ? AND sites.user_id = ?',
+        [req.params.id, req.user.id]
+    );
+    res.json({ success: true });
+});
+
+app.delete('/api/alerts', authenticateToken, async (req, res) => {
+    await pool.query('DELETE alerts FROM alerts JOIN sites ON alerts.site_id = sites.id WHERE sites.user_id = ?', [req.user.id]);
+    res.json({ success: true });
+});
+
+app.delete('/api/alerts/:id', authenticateToken, async (req, res) => {
+    await pool.query('DELETE alerts FROM alerts JOIN sites ON alerts.site_id = sites.id WHERE alerts.id = ? AND sites.user_id = ?', [req.params.id, req.user.id]);
+    res.json({ success: true });
+});
+
+app.get('/api/proxy', authenticateToken, ssrfProtect, async (req, res) => {
     let targetUrl = req.query.url;
     if (!targetUrl) return res.status(400).send("Missing URL");
-
-    if (!targetUrl.includes('http')) {
-        targetUrl = "https://" + targetUrl;
-        console.log(`Corrected url to ${targetUrl}`);
-    }
+    if (!targetUrl.includes('http')) targetUrl = "https://" + targetUrl;
 
     try {
         const response = await axios.get(targetUrl, {
@@ -153,15 +196,11 @@ app.get('/api/proxy', ssrfProtect, async (req, res) => {
             }
         });
 
-
-        // Don't use /assets on purpose - <base> can interfere and mess things up.
         const inspectorCSS = await fs.readFile(path.join(__dirname, 'public/inspector.css'), 'utf-8');
         const inspectorJS = await fs.readFile(path.join(__dirname, 'public/inspector.js'), 'utf-8');
 
         const $ = cheerio.load(response.data);
-
         $('head').prepend(`<base href="${targetUrl}">`);
-        // Force absolute paths so they ignore the <base> tag
         $('head').append(`<style id="piq-inspector-styles">${inspectorCSS}</style>`);
 
         const inspectorUI = `
@@ -176,38 +215,18 @@ app.get('/api/proxy', ssrfProtect, async (req, res) => {
     }
 });
 
-app.patch('/api/sites/:id/freeze', async (req, res) => {
-    try {
-        const { is_frozen } = req.body;
-        await pool.query('UPDATE sites SET is_frozen = ? WHERE id = ?', [is_frozen, req.params.id]);
-        res.json({ success: true });
-    } catch (err) {
-        console.error("PATCH /api/sites/freeze Error:", err.message);
-        res.status(500).json({ error: err.message });
-    }
-});
-
 async function runWorker() {
-    // console.log("Checking active nodes...");
     process.stdout.write(". ");
     try {
         const [sites] = await pool.query('SELECT * FROM sites');
         for (let site of sites) {
             try {
-                const { data } = await axios.get(site.url, {
-                    timeout: 15000,
-                    headers: {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                        'Accept-Language': 'en-US,en;q=0.5'
-                    }
-                });
+                const { data } = await axios.get(site.url, { timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0' } });
                 const $ = cheerio.load(data);
                 const target = $(site.css_selector);
 
                 if (!target.length) continue;
                 if (site.is_frozen) continue;
-
 
                 const $cleaner = cheerio.load(target.html());
                 $cleaner('script, style, noscript, svg, path, meta, link, [style*="display: none"], [style*="display:none"], [aria-hidden="true"]').remove();
@@ -218,20 +237,12 @@ async function runWorker() {
 
                 for (let el of mediaElements) {
                     if (el.attribs && el.attribs.src) {
-                        // ensuring the URL is absolute
                         const absoluteMediaUrl = new URL(el.attribs.src, site.url).href;
-
                         try {
-                            // downloading the actual file data
-                            const mediaRes = await axios.get(absoluteMediaUrl, {
-                                responseType: 'arraybuffer', // pure binary data
-                                timeout: 5000
-                            });
-
+                            const mediaRes = await axios.get(absoluteMediaUrl, { responseType: 'arraybuffer', timeout: 5000 });
                             const fileHash = crypto.createHash('md5').update(mediaRes.data).digest('hex');
                             mediaHashString += `|BIN:${fileHash}`;
                         } catch (e) {
-                            // fallback if download fails
                             mediaHashString += `|URL:${absoluteMediaUrl}`;
                         }
                     }
@@ -241,28 +252,14 @@ async function runWorker() {
                 const newHash = crypto.createHash('sha256').update(contentToHash).digest('hex');
 
                 if (site.last_hash && newHash !== site.last_hash) {
-                    console.log(`Change detected on ${site.name}`);
-
-                    // converting relative paths to absolute
-                    target.find('[src]').addBack('[src]').each((i, el) => {
-                        if (el.attribs.src) el.attribs.src = new URL(el.attribs.src, site.url).href;
-                    });
-                    target.find('[href]').addBack('[href]').each((i, el) => {
-                        if (el.attribs.href) el.attribs.href = new URL(el.attribs.href, site.url).href;
-                    });
+                    target.find('[src]').addBack('[src]').each((i, el) => { if (el.attribs.src) el.attribs.src = new URL(el.attribs.src, site.url).href; });
+                    target.find('[href]').addBack('[href]').each((i, el) => { if (el.attribs.href) el.attribs.href = new URL(el.attribs.href, site.url).href; });
 
                     const feedHtml = $.html(target);
-
-                    await pool.query(
-                        'INSERT INTO alerts (site_id, captured_html) VALUES (?, ?)',
-                        [site.id, feedHtml]
-                    );
+                    await pool.query('INSERT INTO alerts (site_id, captured_html) VALUES (?, ?)', [site.id, feedHtml]);
                 }
 
-                await pool.query(
-                    'UPDATE sites SET last_hash = ? WHERE id = ?',
-                    [newHash, site.id]
-                );
+                await pool.query('UPDATE sites SET last_hash = ? WHERE id = ?', [newHash, site.id]);
             } catch (err) {
                 console.error(`Skipping ${site.name}: ${err.message}`);
             }
@@ -273,19 +270,13 @@ async function runWorker() {
 }
 
 app.use(express.static(path.join(__dirname, 'frontend/dist')));
-
 app.use((req, res) => {
-    if (req.method === 'GET') {
-        res.sendFile(path.join(__dirname, 'frontend/dist/index.html'));
-    } else {
-        res.status(404).json({ error: "Not found" });
-    }
+    if (req.method === 'GET') { res.sendFile(path.join(__dirname, 'frontend/dist/index.html')); }
+    else { res.status(404).json({ error: "Not found" }); }
 });
 
 await initDB();
-app.listen(3000, () => {
-    console.log("Server running at http://localhost:3000");
-});
+app.listen(3000, () => { console.log("Server running at http://localhost:3000"); });
 
 runWorker();
 setInterval(runWorker, 10000);
