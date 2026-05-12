@@ -14,23 +14,31 @@ window.addEventListener('message', (event) => {
     }
 });
 
+// Generates a strictly unique DOM path
 function getCssSelector(el) {
     if (el.tagName.toLowerCase() == "html") return "html";
-    let str = el.tagName.toLowerCase();
-    str += (el.id != "") ? "#" + el.id : "";
-    if (el.className) {
-        let classes = el.className.split(/\s+/).filter(c => c);
-        for (let i = 0; i < classes.length; i++) {
-            str += "." + classes[i];
+    let path = [];
+    while (el.nodeType === Node.ELEMENT_NODE) {
+        let selector = el.nodeName.toLowerCase();
+        if (el.id) {
+            selector += '#' + el.id;
+            path.unshift(selector);
+            break;
+        } else {
+            let sib = el, nth = 1;
+            while (sib = sib.previousElementSibling) {
+                if (sib.nodeName.toLowerCase() == selector) nth++;
+            }
+            if (nth != 1) selector += ":nth-of-type("+nth+")";
         }
+        path.unshift(selector);
+        el = el.parentNode;
     }
-    return str;
+    return path.join(" > ");
 }
 
 document.addEventListener('mouseover', function(e) {
     if (!inspectorActive) return;
-
-    // Don't highlight our own overlay
     if (e.target.id === 'inspector-overlay' || e.target.id === 'inspector-label') return;
 
     e.stopPropagation();

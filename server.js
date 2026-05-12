@@ -232,21 +232,39 @@ async function runWorker() {
                 $cleaner('script, style, noscript, svg, path, meta, link, [style*="display: none"], [style*="display:none"], [aria-hidden="true"]').remove();
                 let textValue = $cleaner.root().text().replace(/\s+/g, ' ').trim();
 
-                let mediaHashString = "";
-                const mediaElements = target.find('img, video source, audio source').addBack('img, video source, audio source').toArray();
+                const mediaElements = target.find('img, video source, audio source, picture source').addBack('img, video source, audio source, picture source').toArray();
 
-                for (let el of mediaElements) {
-                    if (el.attribs && el.attribs.src) {
-                        const absoluteMediaUrl = new URL(el.attribs.src, site.url).href;
-                        try {
-                            const mediaRes = await axios.get(absoluteMediaUrl, { responseType: 'arraybuffer', timeout: 5000 });
-                            const fileHash = crypto.createHash('md5').update(mediaRes.data).digest('hex');
-                            mediaHashString += `|BIN:${fileHash}`;
-                        } catch (e) {
-                            mediaHashString += `|URL:${absoluteMediaUrl}`;
-                        }
+                // Download all media on the target node simultaneously
+                const mediaPromises = mediaElements.map(async (el) => {
+                    let rawSrc = el.attribs.src || el.attribs['data-src'] || el.attribs.srcset;
+                    if (!rawSrc) return "";
+
+                    if (rawSrc.includes(',')) rawSrc = rawSrc.split(',')[0].trim().split(' ')[0];
+
+                    if (rawSrc.startsWith('data:')) {
+                        const fileHash = crypto.createHash('md5').update(rawSrc).digest('hex');
+                        return `|B64:${fileHash}`;
                     }
-                }
+
+                    try {
+                        const absoluteMediaUrl = new URL(rawSrc, site.url).href;
+                        // Increased timeout to 15s for massive NASA images
+                        const mediaRes = await axios.get(absoluteMediaUrl, {
+                            responseType: 'arraybuffer',
+                            timeout: 15000,
+                            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+                        });
+                        const fileHash = crypto.createHash('md5').update(mediaRes.data).digest('hex');
+                        return `|BIN:${fileHash}`;
+                    } catch (e) {
+                        // If it completely fails:
+                        return `|URL:${rawSrc}`;
+                    }
+                });
+
+                // Wait for all simultaneous downloads to finish
+                const resolvedMedia = await Promise.all(mediaPromises);
+                const mediaHashString = resolvedMedia.join('');
 
                 const contentToHash = textValue + mediaHashString;
                 const newHash = crypto.createHash('sha256').update(contentToHash).digest('hex');
@@ -269,6 +287,11 @@ async function runWorker() {
     }
 }
 
+async function startEngine() {
+    await runWorker();
+    setTimeout(startEngine, 10000);
+}
+
 app.use(express.static(path.join(__dirname, 'frontend/dist')));
 app.use((req, res) => {
     if (req.method === 'GET') { res.sendFile(path.join(__dirname, 'frontend/dist/index.html')); }
@@ -278,5 +301,4 @@ app.use((req, res) => {
 await initDB();
 app.listen(3000, () => { console.log("Server running at http://localhost:3000"); });
 
-runWorker();
-setInterval(runWorker, 10000);
+startEngine();
