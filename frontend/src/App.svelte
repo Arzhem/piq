@@ -7,12 +7,10 @@
 
   const API_BASE = '/api';
 
-  // Global UI State
   let token = localStorage.getItem('piq_token') || '';
   let theme = localStorage.getItem('piq_theme') || 'dark';
   let activePage = 'feed';
 
-  // Auth State
   let authMode = 'login';
   let authUsername = '';
   let authPassword = '';
@@ -22,6 +20,7 @@
   let proxyUrl = '';
   let siteName = '';
   let selectedSelector = '';
+  let checkInterval = "600";
 
   let alerts = [];
   let sites = [];
@@ -31,58 +30,68 @@
 
   let isSyncing = false;
   let serverStatus = 'connected';
-
   let toast = { visible: false, message: '', type: 'success' };
   let toastTimeout;
 
-  // Interactive State
   let activeModalAlert = null;
+  let editingNode = null;
   let inspectorActive = true;
   let iframeRef;
 
   let confirmDialog = { visible: false, title: '', message: '', actionText: '', onConfirm: null };
 
-  // Alert Filtering Logic
   $: latestAlertIds = (() => {
     const map = new Map();
     alerts.forEach(a => {
-      if (!map.has(a.site_id) || new Date(a.created_at) > new Date(map.get(a.site_id).created_at)) {
-        map.set(a.site_id, a);
-      }
+      if (!map.has(a.site_id) || new Date(a.created_at) > new Date(map.get(a.site_id).created_at)) map.set(a.site_id, a);
     });
     return new Set(Array.from(map.values()).map(a => a.id));
   })();
 
-  // Only shows the absolute newest unread alert per node
-  $: liveFeedAlerts = alerts.filter(a => !a.is_read && latestAlertIds.has(a.id));
-  // Shows read alerts OR outdated alerts
-  $: archivedAlerts = alerts.filter(a => a.is_read || (!latestAlertIds.has(a.id) && !a.is_read));
+  $: liveFeedAlerts = alerts.filter(a => !a.is_read);
+  $: archivedAlerts = alerts.filter(a => a.is_read);
+  $: unreadCounts = alerts.filter(a => !a.is_read).reduce((acc, a) => { acc[a.site_id] = (acc[a.site_id] || 0) + 1; return acc; }, {});
 
-  $: {
-    if (typeof window !== 'undefined') localStorage.setItem('piq_theme', theme);
+  $: sortedSites = [...sites].sort((a, b) => {
+    const aAlert = alerts.find(al => al.site_id === a.id);
+    const bAlert = alerts.find(al => al.site_id === b.id);
+    const aTime = aAlert ? new Date(aAlert.created_at).getTime() : 0;
+    const bTime = bAlert ? new Date(bAlert.created_at).getTime() : 0;
+    return bTime - aTime;
+  });
+
+  $: { if (typeof window !== 'undefined') localStorage.setItem('piq_theme', theme); }
+
+  function getHostname(url) {
+    try { return new URL(url).hostname; } catch(e) { return ''; }
   }
 
   function requestConfirm(title, message, actionText, callback) {
     confirmDialog = { visible: true, title, message, actionText, onConfirm: callback };
     showUserMenu = false;
+    editingNode = null;
   }
 
-  function executeConfirm() {
-    if (confirmDialog.onConfirm) confirmDialog.onConfirm();
+  async function executeConfirm() {
+    if (confirmDialog.onConfirm) {
+      try {
+        await confirmDialog.onConfirm();
+      } catch (e) {
+        console.error("Confirmation action failed:", e);
+      }
+    }
     confirmDialog.visible = false;
   }
 
   function timeAgo(dateString) {
-    const now = new Date();
     const past = new Date(dateString);
-    const diffMs = now.getTime() - past.getTime();
-    const diffMins = Math.round(diffMs / 60000);
+    const diffMins = Math.round((new Date().getTime() - past.getTime()) / 60000);
+    const diffDays = Math.floor(diffMins / 1440);
 
+    if (diffDays >= 7) return past.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
     if (diffMins < 1) return 'Just now';
     if (diffMins < 60) return `${diffMins}m ago`;
-    const diffHrs = Math.floor(diffMins / 60);
-    if (diffHrs < 24) return `${diffHrs}h ago`;
-    const diffDays = Math.floor(diffHrs / 24);
+    if (diffMins < 1440) return `${Math.floor(diffMins / 60)}h ago`;
     return `${diffDays}d ago`;
   }
 
@@ -94,7 +103,7 @@
 
   function handleNetworkChange(status) {
     serverStatus = status;
-    if (status === 'offline') showNotification('Connection lost. Working offline.', 'error', 0);
+    if (status === 'offline') showNotification('Connection lost.', 'error', 0);
     else { showNotification('Signal restored.', 'success'); if (token) initFetch(); }
   }
 
@@ -109,137 +118,120 @@
     authError = '';
     const endpoint = authMode === 'login' ? '/api/login' : '/api/register';
     try {
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: authUsername, password: authPassword })
-      });
+      const res = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: authUsername, password: authPassword }) });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Authentication failed');
 
       if (authMode === 'register') {
-        authMode = 'login';
-        showNotification('Identity secured. Please log in.', 'success');
+        authMode = 'login'; showNotification('Account created. Please log in.', 'success');
       } else {
-        token = data.token;
-        localStorage.setItem('piq_token', token);
-        authUsername = ''; authPassword = '';
-        initFetch();
+        token = data.token; localStorage.setItem('piq_token', token);
+        authUsername = ''; authPassword = ''; initFetch();
       }
-    } catch (err) { authError = err.message; }
+    } catch (err) {
+      authError = err.message;
+      console.error("Auth Error:", err);
+    }
   }
 
-  function logout() {
-    token = '';
-    localStorage.removeItem('piq_token');
-    sites = []; alerts = []; proxyUrl = '';
-  }
+  function logout() { token = ''; localStorage.removeItem('piq_token'); sites = []; alerts = []; proxyUrl = ''; }
 
   onMount(() => {
     if (token) initFetch();
-    const pollInterval = setInterval(async () => {
-      if (serverStatus === 'connected' && token) await fetchAlerts(true);
-    }, 5000);
+    const pollInterval = setInterval(async () => { if (serverStatus === 'connected' && token) await fetchAlerts(true); }, 5000);
     window.addEventListener('offline', () => handleNetworkChange('offline'));
     window.addEventListener('online', () => handleNetworkChange('connected'));
     window.addEventListener('message', (event) => {
-      if (event.data.type === 'SELECTOR_PICKED') {
-        selectedSelector = event.data.selector;
-        showNotification('Target element locked.', 'success');
-      }
+      if (event.data.type === 'SELECTOR_PICKED') { selectedSelector = event.data.selector; showNotification('Element targeted.', 'success'); }
     });
     return () => clearInterval(pollInterval);
   });
 
-  async function initFetch() {
-    isSyncing = true;
-    try { await Promise.all([fetchSites(), fetchAlerts()]); } finally { isSyncing = false; }
-  }
+  async function initFetch() { isSyncing = true; try { await Promise.all([fetchSites(), fetchAlerts()]); } finally { isSyncing = false; } }
 
   async function fetchSites() {
-    isSyncing = true;
     try {
       const res = await authFetch(`${API_BASE}/sites`);
       if (res.ok) sites = await res.json();
-    } catch (e) { if(serverStatus !== 'offline') handleNetworkChange('offline'); } finally { isSyncing = false; }
+    } catch (e) {
+      console.error("Failed to fetch sites", e);
+      if(serverStatus !== 'offline') handleNetworkChange('offline');
+    }
   }
 
   async function fetchAlerts(isBackground = false) {
     if (!isBackground) isSyncing = true;
+    else isSyncing = true;
+
     try {
       const res = await authFetch(`${API_BASE}/alerts`);
       if (res.ok) alerts = await res.json();
-    } catch (e) { if(serverStatus !== 'offline') handleNetworkChange('offline'); } finally { if (!isBackground) isSyncing = false; }
+    } catch (e) {
+      console.error("Failed to fetch alerts", e);
+      if(serverStatus !== 'offline') handleNetworkChange('offline');
+    }
+    finally { setTimeout(() => isSyncing = false, 800); }
   }
 
-  function loadProxy() {
-    if (!targetUrl) return;
-    proxyUrl = `${API_BASE}/proxy?url=${encodeURIComponent(targetUrl)}&token=${token}`;
-    selectedSelector = ''; inspectorActive = true;
-  }
+  function loadProxy() { if (!targetUrl) return; proxyUrl = `${API_BASE}/proxy?url=${encodeURIComponent(targetUrl)}&token=${token}`; selectedSelector = ''; inspectorActive = true; }
+  function toggleInspector() { inspectorActive = !inspectorActive; if (iframeRef && iframeRef.contentWindow) iframeRef.contentWindow.postMessage({ type: 'TOGGLE_INSPECTOR', active: inspectorActive }, '*'); }
+  function pickAgain() { selectedSelector = ''; inspectorActive = true; if (iframeRef && iframeRef.contentWindow) iframeRef.contentWindow.postMessage({ type: 'TOGGLE_INSPECTOR', active: inspectorActive }, '*'); }
 
-  function toggleInspector() {
-    inspectorActive = !inspectorActive;
-    if (iframeRef && iframeRef.contentWindow) iframeRef.contentWindow.postMessage({ type: 'TOGGLE_INSPECTOR', active: inspectorActive }, '*');
-  }
+  function handleAddClick() {
+    if (!siteName || !targetUrl || !selectedSelector) return;
 
-  function pickAgain() {
-    selectedSelector = ''; inspectorActive = true;
-    if (iframeRef && iframeRef.contentWindow) iframeRef.contentWindow.postMessage({ type: 'TOGGLE_INSPECTOR', active: inspectorActive }, '*');
+    const normalizedUrl = targetUrl.startsWith('http') ? targetUrl : 'https://' + targetUrl;
+    const cleanUrl = normalizedUrl.replace(/\/$/, '').toLowerCase();
+    const cleanSelector = selectedSelector.trim();
+
+    const isDuplicate = sites.some(s =>
+            s.url.replace(/\/$/, '').toLowerCase() === cleanUrl &&
+            s.css_selector.trim() === cleanSelector
+    );
+
+    if (isDuplicate) {
+      requestConfirm("Duplicate Tracker", "You are already monitoring this exact element on this page. Create a duplicate anyway?", "TRACK ANYWAY", saveTarget);
+    } else saveTarget();
   }
 
   async function saveTarget() {
-    if (!siteName || !targetUrl || !selectedSelector) return;
     isSyncing = true;
     const res = await authFetch(`${API_BASE}/sites`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: siteName, url: targetUrl, css_selector: selectedSelector })
+      body: JSON.stringify({ name: siteName, url: targetUrl, css_selector: selectedSelector, interval: parseInt(checkInterval) })
     });
-    if (res.ok) {
-      siteName = ''; selectedSelector = ''; proxyUrl = ''; fetchSites();
-      showNotification('Node added to the engine.', 'success');
+    if (res.ok) { siteName = ''; selectedSelector = ''; proxyUrl = ''; fetchSites(); showNotification('Tracker active.', 'success'); }
+  }
+
+  async function updateNode(node) {
+    isSyncing = true;
+    try {
+      const res = await authFetch(`${API_BASE}/sites/${node.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: node.name, check_interval_seconds: parseInt(node.check_interval_seconds) })
+      });
+      if (res.ok) {
+        editingNode = null;
+        fetchSites();
+        showNotification('Tracker updated.', 'success');
+      } else {
+        console.error("Failed to update node.");
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      isSyncing = false;
     }
   }
 
-  async function deleteTarget(id) {
-    await authFetch(`${API_BASE}/sites/${id}`, { method: 'DELETE' });
-    fetchSites(); fetchAlerts();
-  }
-
-  async function toggleFreeze(id, currentState) {
-    await authFetch(`${API_BASE}/sites/${id}/freeze`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ is_frozen: !currentState })
-    });
-    fetchSites();
-  }
-
-  async function markAsRead(id) {
-    await authFetch(`${API_BASE}/alerts/${id}/read`, { method: 'PATCH' });
-    alerts = alerts.map(a => a.id === id ? { ...a, is_read: 1 } : a);
-    if(activeModalAlert && activeModalAlert.id === id) activeModalAlert.is_read = 1;
-  }
-
-  async function deleteAlert(id) {
-    await authFetch(`${API_BASE}/alerts/${id}`, { method: 'DELETE' });
-    alerts = alerts.filter(a => a.id !== id);
-    if(activeModalAlert && activeModalAlert.id === id) activeModalAlert = null;
-  }
-
-  async function clearAlerts() {
-    await authFetch(`${API_BASE}/alerts`, { method: 'DELETE' });
-    fetchAlerts();
-    showNotification('Data purged successfully.', 'success');
-  }
-
-  // Click outside to close user menu
-  function handleWindowClick(e) {
-    if (showUserMenu && !e.target.closest('.user-menu-container')) {
-      showUserMenu = false;
-    }
-  }
+  async function deleteTarget(id) { await authFetch(`${API_BASE}/sites/${id}`, { method: 'DELETE' }); editingNode = null; fetchSites(); fetchAlerts(); }
+  async function toggleFreeze(id, currentState) { await authFetch(`${API_BASE}/sites/${id}/freeze`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ is_frozen: !currentState }) }); editingNode = null; fetchSites(); }
+  async function markAsRead(id) { await authFetch(`${API_BASE}/alerts/${id}/read`, { method: 'PATCH' }); alerts = alerts.map(a => a.id === id ? { ...a, is_read: 1 } : a); if(activeModalAlert && activeModalAlert.id === id) activeModalAlert.is_read = 1; }
+  async function deleteAlert(id) { await authFetch(`${API_BASE}/alerts/${id}`, { method: 'DELETE' }); alerts = alerts.filter(a => a.id !== id); if(activeModalAlert && activeModalAlert.id === id) activeModalAlert = null; }
+  async function clearAlerts() { await authFetch(`${API_BASE}/alerts`, { method: 'DELETE' }); fetchAlerts(); showNotification('History cleared.', 'success'); }
+  function handleWindowClick(e) { if (showUserMenu && !e.target.closest('.user-menu-container')) showUserMenu = false; }
 </script>
 
 <svelte:window on:click={handleWindowClick} />
@@ -261,21 +253,13 @@
     <div class="auth-container">
       <div class="auth-card" in:fade>
         <img src={piq_logo} alt="piq" class="auth-logo" />
-        <h2 style="text-align: center; margin-bottom: 2rem;">{authMode === 'login' ? 'SECURE LOGIN' : 'INITIALIZE NODE'}</h2>
-
-        {#if authError}
-          <div class="auth-error" in:slide>{authError}</div>
-        {/if}
-
+        <h2 style="text-align: center; margin-bottom: 2rem;">{authMode === 'login' ? 'Welcome Back' : 'Create Account'}</h2>
+        {#if authError}<div class="auth-error" in:slide>{authError}</div>{/if}
         <input type="text" bind:value={authUsername} placeholder="Username" />
-        <input type="password" bind:value={authPassword} placeholder="Encryption Key (Password)" on:keydown={e => e.key === 'Enter' && handleAuth()} />
-
-        <button class="action-btn" on:click={handleAuth} style="margin-top: 1.5rem;">
-          {authMode === 'login' ? 'ENTER PLATFORM' : 'REGISTER'}
-        </button>
-
+        <input type="password" bind:value={authPassword} placeholder="Password" on:keydown={e => e.key === 'Enter' && handleAuth()} />
+        <button class="action-btn" on:click={handleAuth} style="margin-top: 1.5rem;">{authMode === 'login' ? 'Sign In' : 'Sign Up'}</button>
         <button class="ghost-btn" on:click={() => { authMode = authMode === 'login' ? 'register' : 'login'; authError = ''; }} style="width: 100%; border: none; margin-top: 0.5rem;">
-          {authMode === 'login' ? 'Need access? Register here' : 'Already have access? Log in'}
+          {authMode === 'login' ? 'Need an account? Sign up' : 'Already have an account? Sign in'}
         </button>
       </div>
     </div>
@@ -284,13 +268,20 @@
     <div class="layout">
       <aside class="side-nav desktop-only">
         <div class="nav-brand"><img src={piq_logo} alt="piq" /></div>
-        <nav class="nav-links">
-          <button class="nav-btn {activePage === 'feed' && !showArchived ? 'active' : ''}" on:click={() => { activePage = 'feed'; showArchived = false; }}>
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg> LIVE FEED
-          </button>
-          <button class="nav-btn {activePage === 'feed' && showArchived ? 'active' : ''}" on:click={() => { activePage = 'feed'; showArchived = true; }}>
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10z"/></svg> ARCHIVE
-          </button>
+        <nav class="nav-links" style="flex-grow: 1; display: flex; flex-direction: column; justify-content: space-between;">
+          <div>
+            <button class="nav-btn {activePage === 'feed' && !showArchived ? 'active' : ''}" on:click={() => { activePage = 'feed'; showArchived = false; }}>
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg> Live Updates
+            </button>
+            <button class="nav-btn {activePage === 'feed' && showArchived ? 'active' : ''}" on:click={() => { activePage = 'feed'; showArchived = true; }}>
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10z"/></svg> History
+            </button>
+          </div>
+          <div>
+            <button class="nav-btn {activePage === 'settings' ? 'active' : ''}" on:click={() => activePage = 'settings'}>
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M19.14,12.94c0.04-0.3,0.06-0.61,0.06-0.94c0-0.32-0.02-0.64-0.06-0.94l2.03-1.58c0.18-0.14,0.23-0.41,0.12-0.61 l-1.92-3.32c-0.12-0.22-0.37-0.29-0.59-0.22l-2.39,0.96c-0.5-0.38-1.03-0.7-1.62-0.94L14.4,2.81c-0.04-0.24-0.24-0.41-0.48-0.41 h-3.84c-0.24,0-0.43,0.17-0.47,0.41L9.25,5.35C8.66,5.59,8.12,5.92,7.63,6.29L5.24,5.33c-0.22-0.08-0.47,0-0.59,0.22L2.73,8.87 C2.62,9.08,2.66,9.34,2.86,9.48l2.03,1.58C4.84,11.36,4.8,11.69,4.8,12s0.02,0.64,0.06,0.94l-2.03,1.58 c-0.18,0.14-0.23,0.41-0.12,0.61l1.92,3.32c0.12,0.22,0.37,0.29,0.59,0.22l2.39-0.96c0.5,0.38,1.03,0.7,1.62,0.94l0.36,2.54 c0.05,0.24,0.24,0.41,0.48,0.41h3.84c0.24,0,0.44-0.17,0.47-0.41l0.36-2.54c0.59-0.24,1.13-0.56,1.62-0.94l2.39,0.96 c0.22,0.08,0.47,0,0.59-0.22l1.92-3.32c0.12-0.22,0.07-0.49-0.12-0.61L19.14,12.94z M12,15.6c-1.98,0-3.6-1.62-3.6-3.6 s1.62-3.6,3.6-3.6s3.6,1.62,3.6,3.6S13.98,15.6,12,15.6z"/></svg> Settings
+            </button>
+          </div>
         </nav>
       </aside>
 
@@ -298,15 +289,18 @@
         <header class="top-nav">
           <div class="header-with-spinner">
             <div class="mobile-only nav-brand" style="border:none; padding: 0;"><img src={piq_logo} alt="piq" /></div>
-            {#if isSyncing}<div class="spinner" in:fade out:fade></div>{/if}
           </div>
           <div class="top-nav-actions">
             {#if activePage === 'feed'}
-              <button class="icon-btn delete-icon-btn" on:click={() => requestConfirm("Purge Data", "Delete all visible signals?", "PURGE", clearAlerts)}>
+              {#if isSyncing}
+                <div style="display:flex; align-items:center; gap:8px; color: var(--text-muted); font-size: 0.8rem; font-weight: 600;" in:fade out:fade>
+                  <span class="status-pulse active" style="margin:0;"></span> SYNCING...
+                </div>
+              {/if}
+              <button class="icon-btn delete-icon-btn" on:click={() => requestConfirm("Clear Updates", "Dismiss all visible alerts?", "CLEAR", clearAlerts)}>
                 <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M16 9v10H8V9h8m-1.5-6h-5l-1 1H5v2h14V4h-3.5l-1-1zM18 7H6v12c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7z"/></svg>
               </button>
             {/if}
-
             <div class="user-menu-container">
               <button class="icon-btn profile-btn" on:click|stopPropagation={() => showUserMenu = !showUserMenu}>
                 <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 3c1.66 0 3 1.34 3 3s-1.34 3-3 3-3-1.34-3-3 1.34-3 3-3zm0 14.2c-2.5 0-4.71-1.28-6-3.22.03-1.99 4-3.08 6-3.08 1.99 0 5.97 1.09 6 3.08-1.29 1.94-3.5 3.22-6 3.22z"/></svg>
@@ -315,7 +309,7 @@
                 <div class="dropdown-menu" in:fly={{y: -10, duration: 150}}>
                   <button on:click={() => { activePage = 'settings'; showUserMenu = false; }}>Settings</button>
                   <div class="dropdown-divider"></div>
-                  <button style="color: #ff4444;" on:click={() => requestConfirm("Disconnect", "End the current session?", "LOGOUT", logout)}>Sign Out</button>
+                  <button style="color: #ff4444;" on:click={() => requestConfirm("Sign Out", "End the current session?", "SIGN OUT", logout)}>Sign Out</button>
                 </div>
               {/if}
             </div>
@@ -325,50 +319,42 @@
         {#if activePage === 'feed'}
           <main class="dashboard-grid">
             <section class="feed-center">
-              <div class="feed-header">
-                <h2>{showArchived ? 'ARCHIVE' : 'LIVE FEED'}</h2>
-              </div>
-
+              <div class="feed-header"><h2>{showArchived ? 'History' : 'Live Dashboard'}</h2></div>
               <div class="alerts-list">
                 {#each (showArchived ? archivedAlerts : liveFeedAlerts) as alert (alert.id)}
                   <div class="media-card" animate:flip={{duration: 350, easing: cubicOut}} in:fly={{ y: 20, duration: 400 }} out:slide={{duration: 300}}>
                     <div class="card-header">
                       <div class="header-left">
+                        <img src="https://www.google.com/s2/favicons?domain={getHostname(alert.url)}&sz=32" alt="" class="site-favicon" />
                         <a href={alert.url} target="_blank" class="badge link-badge">{alert.name}</a>
-                        {#if !latestAlertIds.has(alert.id)}<span class="badge outdated-badge">HISTORY</span>{/if}
+                        {#if !latestAlertIds.has(alert.id)}
+                          <span class="badge outdated-badge">OUTDATED</span>
+                        {/if}
                       </div>
                       <div class="header-right">
                         <span class="timestamp">{timeAgo(alert.created_at)}</span>
-                        <button class="icon-btn delete-icon-btn" on:click={() => requestConfirm("Delete Signal", "Remove this alert permanently?", "DELETE", () => deleteAlert(alert.id))}>
+                        <button class="icon-btn delete-icon-btn" on:click={() => deleteAlert(alert.id)} title="Dismiss">
                           <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
                         </button>
                       </div>
                     </div>
-
                     <div class="card-content clamped-view">
                       <div class="html-wrapper">{@html alert.captured_html}</div>
                       <div class="fade-overlay"></div>
                     </div>
-
                     <div class="card-footer">
-                      <button class="ghost-btn expand-btn" on:click={() => activeModalAlert = alert}>
-                        <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
-                      </button>
-                      {#if !alert.is_read}
-                        <button class="ghost-btn seen-btn" on:click={() => markAsRead(alert.id)}>MARK AS SEEN</button>
-                      {/if}
+                      <button class="ghost-btn expand-btn" on:click={() => activeModalAlert = alert}><svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg></button>
+                      {#if !alert.is_read}<button class="ghost-btn seen-btn" on:click={() => markAsRead(alert.id)}>MARK AS SEEN</button>{/if}
                     </div>
                   </div>
                 {/each}
               </div>
-              {#if (showArchived ? archivedAlerts : liveFeedAlerts).length === 0}
-                <div class="empty-state" in:fade>No unread signals.<br>The grid is silent.</div>
-              {/if}
+              {#if (showArchived ? archivedAlerts : liveFeedAlerts).length === 0}<div class="empty-state" in:fade>No new activity.<br>You're all caught up.</div>{/if}
             </section>
 
             <aside class="right-panel">
               <div class="inspector-section">
-                <h2>01. SELECT TARGET</h2>
+                <h2>Add Tracker</h2>
                 <div class="controls">
                   <input type="text" bind:value={targetUrl} placeholder="https://..." on:keydown={e => e.key === 'Enter' && loadProxy()} />
                   <button on:click={loadProxy}>INSPECT</button>
@@ -377,9 +363,7 @@
                 <div class="iframe-container {isFullscreen ? 'fullscreen' : ''}">
                   <div class="iframe-controls">
                     {#if proxyUrl}
-                      <button class="overlay-btn text-overlay-btn" on:click={toggleInspector} class:active-state={inspectorActive}>
-                        {inspectorActive ? 'INSPECT' : 'INTERACT'}
-                      </button>
+                      <button class="overlay-btn text-overlay-btn" on:click={toggleInspector} class:active-state={inspectorActive}>{inspectorActive ? 'INSPECT' : 'INTERACT'}</button>
                     {/if}
                     <button class="icon-btn overlay-btn" on:click={() => isFullscreen = !isFullscreen}>
                       {#if isFullscreen}<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"/></svg>
@@ -395,31 +379,51 @@
                   {#if selectedSelector}<button class="ghost-btn warning-btn" on:click={pickAgain}>RE-PICK</button>{/if}
                 </div>
                 <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
-                  <input type="text" bind:value={siteName} placeholder="Reference Name" on:keydown={e => e.key === 'Enter' && selectedSelector && saveTarget()} style="margin: 0;"/>
-                  <button on:click={saveTarget} disabled={!selectedSelector} style="margin: 0;">ADD</button>
+                  <input type="text" bind:value={siteName} placeholder="Ref Name" style="margin: 0;"/>
+
+                  <select bind:value={checkInterval} style="width: auto; margin: 0;">
+                    <option value="10">10s</option>
+                    <option value="60">1m</option>
+                    <option value="300">5m</option>
+                    <option value="600">10m</option>
+                    <option value="3600">1h</option>
+                    <option value="86400">24h</option>
+                  </select>
+
+                  <button on:click={handleAddClick} disabled={!selectedSelector} style="margin: 0;">ADD</button>
                 </div>
               </div>
 
               <div class="nodes-section">
-                <h2>ACTIVE NODES</h2>
+                <h2>Monitored Pages</h2>
                 <ul class="node-list" style="margin-top: 1rem;">
-                  {#each sites as site (site.id)}
-                    <li class={site.is_frozen ? 'frozen-node' : ''} animate:flip={{duration: 300}} in:fly={{x: 20, duration: 300}} out:slide>
+                  {#each sortedSites as site (site.id)}
+                    <li class="interactive-node {site.is_frozen ? 'frozen-node' : ''}" animate:flip={{duration: 300}} in:fly={{x: 20, duration: 300}} out:slide on:click={() => editingNode = site}>
                       <div class="node-info">
-                        <span class="status-pulse {site.is_frozen ? 'frozen' : 'active'}"></span>
+                        {#if site.status === 'error'}
+                          <span class="status-pulse" style="background:#ff4444; box-shadow:0 0 8px #ff4444;"></span>
+                        {:else}
+                          <span class="status-pulse {site.is_frozen ? 'frozen' : 'active'}"></span>
+                        {/if}
+
+                        <img src="https://www.google.com/s2/favicons?domain={getHostname(site.url)}&sz=32" alt="" class="site-favicon" />
                         <strong>{site.name}</strong>
+
+                        {#if site.status === 'error'}
+                          <span class="badge" style="background: rgba(255,68,68,0.2); color: #ff4444; margin-left:8px; border: 1px solid rgba(255,68,68,0.4);">BROKEN</span>
+                        {:else if unreadCounts[site.id]}
+                          <span class="badge" style="background: var(--text-main); color: var(--bg-main); margin-left: 8px;">{unreadCounts[site.id]} NEW</span>
+                        {/if}
+
                         {#if site.is_frozen}<span class="badge frozen-badge">FROZEN</span>{/if}
-                        <br><small>{site.url}</small>
                       </div>
-                      <div class="node-actions">
-                        <button class="ghost-btn" on:click={() => toggleFreeze(site.id, site.is_frozen)}>{site.is_frozen ? 'UNFREEZE' : 'FREEZE'}</button>
-                        <button class="icon-btn delete-icon-btn" on:click={() => requestConfirm("Delete Node", `Remove ${site.name} permanently?`, "DELETE", () => deleteTarget(site.id))}>
-                          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
-                        </button>
+
+                      <div class="edit-hint">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19.14,12.94c0.04-0.3,0.06-0.61,0.06-0.94c0-0.32-0.02-0.64-0.06-0.94l2.03-1.58c0.18-0.14,0.23-0.41,0.12-0.61 l-1.92-3.32c-0.12-0.22-0.37-0.29-0.59-0.22l-2.39,0.96c-0.5-0.38-1.03-0.7-1.62-0.94L14.4,2.81c-0.04-0.24-0.24-0.41-0.48-0.41 h-3.84c-0.24,0-0.43,0.17-0.47,0.41L9.25,5.35C8.66,5.59,8.12,5.92,7.63,6.29L5.24,5.33c-0.22-0.08-0.47,0-0.59,0.22L2.73,8.87 C2.62,9.08,2.66,9.34,2.86,9.48l2.03,1.58C4.84,11.36,4.8,11.69,4.8,12s0.02,0.64,0.06,0.94l-2.03,1.58 c-0.18,0.14-0.23,0.41-0.12,0.61l1.92,3.32c0.12,0.22,0.37,0.29,0.59,0.22l2.39-0.96c0.5,0.38,1.03,0.7,1.62,0.94l0.36,2.54 c0.05,0.24,0.24,0.41,0.48,0.41h3.84c0.24,0,0.44-0.17,0.47-0.41l0.36-2.54c0.59-0.24,1.13-0.56,1.62-0.94l2.39,0.96 c0.22,0.08,0.47,0,0.59-0.22l1.92-3.32c0.12-0.22,0.07-0.49-0.12-0.61L19.14,12.94z M12,15.6c-1.98,0-3.6-1.62-3.6-3.6 s1.62-3.6,3.6-3.6s3.6,1.62,3.6,3.6S13.98,15.6,12,15.6z"/></svg>
                       </div>
                     </li>
                   {/each}
-                  {#if sites.length === 0}<div class="empty-state mini-empty" in:fade>No nodes active.</div>{/if}
+                  {#if sites.length === 0}<div class="empty-state mini-empty" in:fade>No trackers active.</div>{/if}
                 </ul>
               </div>
             </aside>
@@ -452,6 +456,58 @@
         </button>
       </nav>
     </div>
+
+    {#if editingNode}
+      <div class="modal-backdrop" in:fade={{duration: 200}} out:fade={{duration: 200}} on:click={() => editingNode = null}>
+        <div class="modal-card mini-modal" on:click|stopPropagation>
+          <div class="modal-header">
+            <h3>Configure Tracker</h3>
+            <button class="icon-btn close-btn" on:click={() => editingNode = null}>
+              <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+            </button>
+          </div>
+          <div class="modal-content mini-content" style="text-align: left;">
+
+            <label style="font-size: 0.8rem; color: var(--text-muted); font-weight: 600;">TRACKER NAME</label>
+            <input type="text" bind:value={editingNode.name} style="margin-bottom: 1.5rem; margin-top: 0.25rem;" />
+
+            <label style="font-size: 0.8rem; color: var(--text-muted); font-weight: 600;">CHECK INTERVAL</label>
+            <select bind:value={editingNode.check_interval_seconds} style="margin-bottom: 1.5rem; margin-top: 0.25rem;">
+              <option value={10}>10 Seconds</option>
+              <option value={60}>1 Minute</option>
+              <option value={300}>5 Minutes</option>
+              <option value={600}>10 Minutes</option>
+              <option value={3600}>1 Hour</option>
+              <option value={86400}>24 Hours</option>
+            </select>
+
+            {#if editingNode.status === 'error'}
+              <div class="auth-error" style="margin-bottom: 1rem; text-align: left;">
+                <strong style="color: #ff4444;">Target Lost / Connection Failed:</strong><br>
+                <span style="font-family: monospace; font-size: 0.75rem; color: var(--text-muted);">
+                  {editingNode.last_error || 'Unknown network error.'}
+                </span>
+              </div>
+            {/if}
+
+            <p style="overflow-wrap: anywhere; word-break: break-word; font-size: 0.85rem;"><strong>URL:</strong> <a href="{editingNode.url}" target="_blank" class="node-url-link">{editingNode.url}</a></p>
+            <p style="font-family: monospace; font-size: 0.75rem; background: var(--bg-main); padding: 8px; border-radius: 4px; color: var(--text-muted);">{editingNode.css_selector}</p>
+
+          </div>
+          <div class="modal-footer mini-footer" style="flex-direction: column; gap: 0.5rem;">
+            <button class="action-btn" style="width: 100%; margin: 0;" on:click={() => updateNode(editingNode)}>SAVE CHANGES</button>
+            <div style="display: flex; justify-content: space-between; gap: 0.5rem; width: 100%;">
+              <button class="ghost-btn" style="flex:1;" on:click={() => { toggleFreeze(editingNode.id, editingNode.is_frozen); editingNode.is_frozen = !editingNode.is_frozen; }}>
+                {editingNode.is_frozen ? 'UNFREEZE' : 'FREEZE'}
+              </button>
+              <button class="ghost-btn" style="flex:1; color: #ff4444; border-color: rgba(255,68,68,0.3);" on:click={() => requestConfirm("Delete Tracker", `Remove ${editingNode.name} permanently?`, "DELETE", () => deleteTarget(editingNode.id))}>
+                DELETE
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    {/if}
 
     {#if activeModalAlert}
       <div class="modal-backdrop" in:fade={{duration: 200}} out:fade={{duration: 200}} on:click={() => activeModalAlert = null}>
@@ -523,13 +579,11 @@
   .seen-btn { flex: 2; display: flex; justify-content: center; align-items: center; border-color: transparent; }
   .seen-btn:hover { border-color: var(--border-color); color: var(--text-main); }
 
-  /* Auth UI */
   .auth-container { width: 100%; height: 100vh; display: flex; align-items: center; justify-content: center; padding: 2rem; }
   .auth-card { background: var(--bg-panel); padding: 3rem; border-radius: 12px; border: 1px solid var(--border-color); width: 100%; max-width: 400px; display: flex; flex-direction: column; }
   .auth-logo { width: 40%; margin: 0 auto 2rem auto; display: block; }
   .auth-error { background: rgba(255, 68, 68, 0.1); color: #ff4444; padding: 1rem; border: 1px solid rgba(255, 68, 68, 0.3); border-radius: 6px; margin-bottom: 1rem; font-size: 0.85rem; text-align: center; }
 
-  /* Layout */
   .layout { display: flex; width: 100%; height: 100vh; position: relative; }
   .side-nav { width: 240px; background: var(--bg-panel); border-right: 1px solid var(--border-color); display: flex; flex-direction: column; z-index: 20; }
   .nav-brand { height: 64px; display: flex; align-items: center; padding: 0 1.5rem; border-bottom: 1px solid var(--border-color); }
@@ -542,7 +596,6 @@
 
   .main-area { flex: 1; display: flex; flex-direction: column; min-width: 0; padding-bottom: 0; }
 
-  /* User Dropdown */
   .user-menu-container { position: relative; display: inline-block; }
   .profile-btn { border: 1px solid var(--border-color); border-radius: 50%; padding: 6px; background: var(--bg-card); }
   .profile-btn:hover { background: var(--border-color); }
@@ -567,14 +620,7 @@
   .feed-center { padding: 2rem; overflow-y: auto; background: var(--bg-main); }
   .feed-header { margin-bottom: 2rem; text-align: center; }
 
-  .alerts-list {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-    gap: 1.5rem;
-    align-items: start;
-    width: 100%;
-    margin: 0 auto;
-  }
+  .alerts-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1.5rem; align-items: start; width: 100%; margin: 0 auto; }
 
   .media-card { background: var(--bg-card); border-radius: 12px; overflow: hidden; border: 1px solid var(--border-color); display: flex; flex-direction: column; width: 100%; }
 
@@ -603,19 +649,30 @@
   .text-overlay-btn.active-state { color: #ffaa00; border-color: #ffaa00; box-shadow: 0 0 8px rgba(255, 170, 0, 0.2); }
   .commit-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; gap: 1rem; }
   .commit-header p { margin: 0; font-size: 0.85rem; overflow-wrap: anywhere; }
+
   .node-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.5rem; }
-  .node-list li { display: flex; flex-direction: column; padding: 1rem; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-card); transition: opacity 0.3s ease; }
+  .node-list li { position: relative; display: flex; flex-direction: column; padding: 1rem; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-card); transition: opacity 0.3s ease, border-color 0.2s; }
+
+  .interactive-node { cursor: pointer; }
+  .interactive-node:hover { border-color: var(--text-muted); }
+  .edit-hint { position: absolute; top: 1rem; right: 1rem; color: var(--text-muted); opacity: 0; transition: opacity 0.2s; pointer-events: none; }
+  .interactive-node:hover .edit-hint { opacity: 1; }
+
   .node-list li.frozen-node { opacity: 0.5; border-style: dashed; }
-  .node-info { margin-bottom: 0.5rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .node-actions { display: flex; gap: 0.5rem; align-items: center; justify-content: space-between; border-top: 1px solid var(--border-color); padding-top: 0.5rem; }
+  .node-info { margin-bottom: 0.5rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 1.5rem; }
+
   .card-header { display: flex; justify-content: space-between; align-items: center; padding: 1rem 1.5rem; border-bottom: 1px solid var(--border-color); }
   .header-left, .header-right { display: flex; align-items: center; gap: 10px; }
+
+  .site-favicon { width: 16px; height: 16px; border-radius: 3px; vertical-align: middle; }
+
   .badge { font-family: monospace; background: var(--bg-panel); padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; border: 1px solid var(--border-color); }
   .link-badge { text-decoration: none; color: var(--accent); transition: background 0.2s; }
   .link-badge:hover { background: var(--border-color); }
   .frozen-badge { background: rgba(0, 102, 255, 0.1); color: #3b82f6; border-color: rgba(0, 102, 255, 0.2); margin-left: 0.5rem; }
   .outdated-badge { background: rgba(255, 170, 0, 0.1); color: #ffaa00; font-size: 0.65rem; border-color: rgba(255, 170, 0, 0.2); }
   .timestamp { color: var(--text-muted); font-size: 0.85rem; font-weight: 600; }
+
   .modal-backdrop { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.85); z-index: 100000; display: flex; align-items: center; justify-content: center; padding: 2rem; backdrop-filter: blur(4px); }
   .modal-card { background: var(--bg-card); border-radius: 12px; border: 1px solid var(--border-color); width: 100%; max-width: 900px; max-height: 90vh; display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0,0,0,0.7); }
   .modal-card.mini-modal { max-width: 400px; }
@@ -625,10 +682,14 @@
   .modal-content.mini-content { background: var(--bg-card); min-height: auto; padding: 1rem 2rem 2rem 2rem; text-align: center; color: var(--text-muted); }
   .modal-footer { padding: 1rem 1.5rem; border-top: 1px solid var(--border-color); }
   .modal-footer.mini-footer { display: flex; gap: 1rem; border-top: none; padding-top: 0; }
+
   .card-content { background: var(--bg-main); position: relative; }
   .card-content.clamped-view { height: 180px; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-start; }
   .html-wrapper { width: 100%; padding: 1rem; overflow-wrap: anywhere; word-break: break-word; }
+
   .fade-overlay { position: absolute; bottom: 0; left: 0; right: 0; height: 60px; background: linear-gradient(to bottom, transparent 0%, var(--bg-main) 100%); pointer-events: none; }
+  .app-wrapper.light .fade-overlay { background: linear-gradient(to bottom, rgba(255,255,255,0) 0%, rgba(255,255,255,1) 100%); }
+
   .card-content :global(img), .card-content :global(video), .modal-content :global(img), .modal-content :global(video) { width: 100%; height: auto; max-height: 600px; object-fit: contain; display: block; margin: 0 auto; }
   .card-content :global(nav), .card-content :global(footer), .card-content :global(script), .modal-content :global(nav), .modal-content :global(footer), .modal-content :global(script) { display: none !important; }
   .card-content :global(a), .modal-content :global(a) { color: var(--accent); padding: 1rem; display: block; word-break: break-all; text-align: center;}
@@ -638,6 +699,9 @@
   .empty-state { text-align: center; padding: 4rem 2rem; color: var(--text-muted); font-family: monospace; border: 1px dashed var(--border-color); border-radius: 12px; line-height: 1.5; grid-column: 1 / -1; }
   .empty-state.mini-empty { padding: 2rem 1rem; font-size: 0.85rem; }
 
+  .node-url-link { color: var(--text-muted); text-decoration: none; font-size: 0.85rem; transition: color 0.2s; }
+  .node-url-link:hover { text-decoration: underline; color: var(--accent); }
+
   .mobile-only { display: none; }
   .mobile-bottom-nav { display: none; }
 
@@ -645,7 +709,7 @@
     :global(body) { overflow-y: auto; }
     .desktop-only { display: none !important; }
     .mobile-only { display: flex; }
-    .main-area { padding-bottom: 70px; /* Space for bottom nav */ }
+    .main-area { padding-bottom: 70px; }
 
     .top-nav { padding: 0 1rem; }
     .dashboard-grid { display: flex; flex-direction: column; overflow: visible; }
@@ -653,7 +717,6 @@
     .right-panel { border-left: none; border-top: 1px solid var(--border-color); }
     .alerts-list { grid-template-columns: 1fr; }
 
-    /* Sticky Bottom App Navigation */
     .mobile-bottom-nav {
       display: flex; position: fixed; bottom: 0; left: 0; right: 0; height: 65px; background: var(--bg-panel); border-top: 1px solid var(--border-color); z-index: 50; justify-content: space-around; align-items: center; padding: 0 1rem;
     }

@@ -75,8 +75,6 @@ async function ssrfProtect(req, res, next) {
 
 function authenticateToken(req, res, next) {
     const authHeader = req.headers['authorization'];
-
-    // Look for the token in the header FIRST, but fall back to the query string for iframes
     const token = (authHeader && authHeader.split(' ')[1]) || req.query.token;
 
     if (!token) return res.status(401).json({ error: "Access denied" });
@@ -126,12 +124,14 @@ app.get('/api/sites', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/sites', authenticateToken, ssrfProtect, async (req, res) => {
-    let { name, url, css_selector } = req.body;
+    let { name, url, css_selector, interval } = req.body;
     if (!url.includes('http')) url = "https://" + url;
 
+    const checkSeconds = interval || 600;
+
     const [result] = await pool.query(
-        'INSERT INTO sites (user_id, name, url, css_selector) VALUES (?, ?, ?, ?)',
-        [req.user.id, name, url, css_selector]
+        'INSERT INTO sites (user_id, name, url, css_selector, check_interval_seconds) VALUES (?, ?, ?, ?, ?)',
+        [req.user.id, name, url, css_selector, checkSeconds]
     );
     res.json({ id: result.insertId });
 });
@@ -169,6 +169,21 @@ app.patch('/api/alerts/:id/read', authenticateToken, async (req, res) => {
         [req.params.id, req.user.id]
     );
     res.json({ success: true });
+});
+
+app.patch('/api/sites/:id', authenticateToken, async (req, res) => {
+    try {
+        const { name, check_interval_seconds } = req.body;
+        // Clears errors on manual update from UI
+        await pool.query(
+            'UPDATE sites SET name = ?, check_interval_seconds = ?, status = "active", consecutive_errors = 0, last_error = NULL WHERE id = ? AND user_id = ?',
+            [name, check_interval_seconds, req.params.id, req.user.id]
+        );
+        res.json({ success: true });
+    } catch (err) {
+        console.error("Update Node Error:", err);
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.delete('/api/alerts', authenticateToken, async (req, res) => {
@@ -215,18 +230,28 @@ app.get('/api/proxy', authenticateToken, ssrfProtect, async (req, res) => {
     }
 });
 
+
 async function runWorker() {
-    process.stdout.write(". ");
+    process.stdout.write(".");
     try {
-        const [sites] = await pool.query('SELECT * FROM sites');
+        const [sites] = await pool.query('SELECT * FROM sites WHERE is_frozen = 0 AND status != "suspended"');
+
         for (let site of sites) {
             try {
+                const lastChecked = site.last_checked ? new Date(site.last_checked) : new Date(0);
+                const intervalMs = (site.check_interval_seconds || 600) * 1000;
+                const nextCheckTime = new Date(lastChecked.getTime() + intervalMs);
+
+                if (new Date() < nextCheckTime) continue;
+
                 const { data } = await axios.get(site.url, { timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0' } });
                 const $ = cheerio.load(data);
                 const target = $(site.css_selector);
 
-                if (!target.length) continue;
-                if (site.is_frozen) continue;
+                if (!target.length) {
+                    // Axios simply can't see JS-rendered elements. Skipping until Playwright.
+                    continue;
+                }
 
                 const $cleaner = cheerio.load(target.html());
                 $cleaner('script, style, noscript, svg, path, meta, link, [style*="display: none"], [style*="display:none"], [aria-hidden="true"]').remove();
@@ -234,9 +259,8 @@ async function runWorker() {
 
                 const mediaElements = target.find('img, video source, audio source, picture source').addBack('img, video source, audio source, picture source').toArray();
 
-                // Download all media on the target node simultaneously
                 const mediaPromises = mediaElements.map(async (el) => {
-                    let rawSrc = el.attribs.src || el.attribs['data-src'] || el.attribs.srcset;
+                    let rawSrc = el.attribs.src || el.attribs['data-src'] || el.attribs.srcset || el.attribs.poster;
                     if (!rawSrc) return "";
 
                     if (rawSrc.includes(',')) rawSrc = rawSrc.split(',')[0].trim().split(' ')[0];
@@ -248,21 +272,29 @@ async function runWorker() {
 
                     try {
                         const absoluteMediaUrl = new URL(rawSrc, site.url).href;
-                        // Increased timeout to 15s for massive NASA images
+
+                        const tagName = el.tagName.toLowerCase();
+                        if (tagName === 'video' || tagName === 'audio' || tagName === 'source') {
+                            return `|HEAVY_MEDIA:${absoluteMediaUrl}`;
+                        }
+
                         const mediaRes = await axios.get(absoluteMediaUrl, {
                             responseType: 'arraybuffer',
-                            timeout: 15000,
-                            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+                            timeout: 10000,
+                            headers: { 'User-Agent': 'Mozilla/5.0' }
                         });
+
                         const fileHash = crypto.createHash('md5').update(mediaRes.data).digest('hex');
+                        const mimeType = mediaRes.headers['content-type'] || 'image/jpeg';
+                        const base64Data = Buffer.from(mediaRes.data, 'binary').toString('base64');
+
+                        el.piqBase64Override = `data:${mimeType};base64,${base64Data}`;
                         return `|BIN:${fileHash}`;
                     } catch (e) {
-                        // If it completely fails:
                         return `|URL:${rawSrc}`;
                     }
                 });
 
-                // Wait for all simultaneous downloads to finish
                 const resolvedMedia = await Promise.all(mediaPromises);
                 const mediaHashString = resolvedMedia.join('');
 
@@ -270,26 +302,57 @@ async function runWorker() {
                 const newHash = crypto.createHash('sha256').update(contentToHash).digest('hex');
 
                 if (site.last_hash && newHash !== site.last_hash) {
-                    target.find('[src]').addBack('[src]').each((i, el) => { if (el.attribs.src) el.attribs.src = new URL(el.attribs.src, site.url).href; });
+                    target.find('img, source').addBack('img, source').each((i, el) => {
+                        const parsedEl = mediaElements.find(m => m === el);
+                        if (parsedEl && parsedEl.piqBase64Override) {
+                            el.attribs.src = parsedEl.piqBase64Override;
+                            if (el.attribs.srcset) delete el.attribs.srcset;
+                        } else if (el.attribs.src) {
+                            el.attribs.src = new URL(el.attribs.src, site.url).href;
+                        }
+                    });
+
                     target.find('[href]').addBack('[href]').each((i, el) => { if (el.attribs.href) el.attribs.href = new URL(el.attribs.href, site.url).href; });
 
                     const feedHtml = $.html(target);
-                    await pool.query('INSERT INTO alerts (site_id, captured_html) VALUES (?, ?)', [site.id, feedHtml]);
+
+                    try {
+                        await pool.query('INSERT INTO alerts (site_id, captured_html) VALUES (?, ?)', [site.id, feedHtml]);
+                    } catch (dbErr) {
+                        console.error(`\nDB SAVE ERROR on [${site.name}]: ${dbErr.message}`);
+                        await pool.query(
+                            'UPDATE sites SET status = "error", last_error = "Database constraint failure. Scraped HTML is too massive to save." WHERE id = ?',
+                            [site.id]
+                        );
+                        continue;
+                    }
                 }
 
-                await pool.query('UPDATE sites SET last_hash = ? WHERE id = ?', [newHash, site.id]);
+                await pool.query('UPDATE sites SET last_hash = ?, last_checked = NOW(), consecutive_errors = 0, status = "active", last_error = NULL WHERE id = ?', [newHash, site.id]);
+
             } catch (err) {
-                console.error(`Skipping ${site.name}: ${err.message}`);
+                console.error(`\nAXIOS FETCH ERROR on [${site.name}]: ${err.message}`);
+
+                const errCount = site.consecutive_errors + 1;
+                let newStatus = site.status;
+                let lastError = err.message;
+
+                if (errCount >= 3) newStatus = 'error';
+
+                await pool.query(
+                    'UPDATE sites SET consecutive_errors = ?, status = ?, last_error = ?, last_checked = NOW() WHERE id = ?',
+                    [errCount, newStatus, lastError.substring(0, 250), site.id]
+                );
             }
         }
     } catch (err) {
-        console.error("Worker error", err.message);
+        console.error("\n[!] Global Worker Engine Error:", err.message);
     }
 }
 
 async function startEngine() {
     await runWorker();
-    setTimeout(startEngine, 10000);
+    setTimeout(startEngine, 5000);
 }
 
 app.use(express.static(path.join(__dirname, 'frontend/dist')));

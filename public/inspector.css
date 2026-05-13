@@ -88,3 +88,5 @@ button:hover { background-color: #2980b9; }
     border-radius: 2px;
     white-space: nowrap;
 }
+
+video, iframe { pointer-events: none !important; }
