@@ -67,9 +67,9 @@
   }
 
   function requestConfirm(title, message, actionText, callback) {
+    // DO NOT set editingNode to null here.
     confirmDialog = { visible: true, title, message, actionText, onConfirm: callback };
     showUserMenu = false;
-    editingNode = null;
   }
 
   async function executeConfirm() {
@@ -130,7 +130,6 @@
       }
     } catch (err) {
       authError = err.message;
-      console.error("Auth Error:", err);
     }
   }
 
@@ -154,7 +153,6 @@
       const res = await authFetch(`${API_BASE}/sites`);
       if (res.ok) sites = await res.json();
     } catch (e) {
-      console.error("Failed to fetch sites", e);
       if(serverStatus !== 'offline') handleNetworkChange('offline');
     }
   }
@@ -167,7 +165,6 @@
       const res = await authFetch(`${API_BASE}/alerts`);
       if (res.ok) alerts = await res.json();
     } catch (e) {
-      console.error("Failed to fetch alerts", e);
       if(serverStatus !== 'offline') handleNetworkChange('offline');
     }
     finally { setTimeout(() => isSyncing = false, 800); }
@@ -216,8 +213,6 @@
         editingNode = null;
         fetchSites();
         showNotification('Tracker updated.', 'success');
-      } else {
-        console.error("Failed to update node.");
       }
     } catch (err) {
       console.error(err);
@@ -226,11 +221,18 @@
     }
   }
 
-  async function deleteTarget(id) { await authFetch(`${API_BASE}/sites/${id}`, { method: 'DELETE' }); editingNode = null; fetchSites(); fetchAlerts(); }
-  async function toggleFreeze(id, currentState) { await authFetch(`${API_BASE}/sites/${id}/freeze`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ is_frozen: !currentState }) }); editingNode = null; fetchSites(); }
+  async function deleteTarget(id) {
+    await authFetch(`${API_BASE}/sites/${id}`, { method: 'DELETE' });
+    editingNode = null;
+    confirmDialog.visible = false;
+    fetchSites();
+    fetchAlerts();
+  }
+
+  async function toggleFreeze(id, currentState) { await authFetch(`${API_BASE}/sites/${id}/freeze`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ is_frozen: !currentState }) }); fetchSites(); }
   async function markAsRead(id) { await authFetch(`${API_BASE}/alerts/${id}/read`, { method: 'PATCH' }); alerts = alerts.map(a => a.id === id ? { ...a, is_read: 1 } : a); if(activeModalAlert && activeModalAlert.id === id) activeModalAlert.is_read = 1; }
   async function deleteAlert(id) { await authFetch(`${API_BASE}/alerts/${id}`, { method: 'DELETE' }); alerts = alerts.filter(a => a.id !== id); if(activeModalAlert && activeModalAlert.id === id) activeModalAlert = null; }
-  async function clearAlerts() { await authFetch(`${API_BASE}/alerts`, { method: 'DELETE' }); fetchAlerts(); showNotification('History cleared.', 'success'); }
+  async function clearAlerts() { await authFetch(`${API_BASE}/alerts`, { method: 'DELETE' }); fetchAlerts(); showNotification('Updates cleared.', 'success'); }
   function handleWindowClick(e) { if (showUserMenu && !e.target.closest('.user-menu-container')) showUserMenu = false; }
 </script>
 
@@ -253,11 +255,11 @@
     <div class="auth-container">
       <div class="auth-card" in:fade>
         <img src={piq_logo} alt="piq" class="auth-logo" />
-        <h2 style="text-align: center; margin-bottom: 2rem;">{authMode === 'login' ? 'Welcome Back' : 'Create Account'}</h2>
+        <h2 style="text-align: center; margin-bottom: 2rem;">{authMode === 'login' ? 'Sign In' : 'Create Workspace'}</h2>
         {#if authError}<div class="auth-error" in:slide>{authError}</div>{/if}
         <input type="text" bind:value={authUsername} placeholder="Username" />
         <input type="password" bind:value={authPassword} placeholder="Password" on:keydown={e => e.key === 'Enter' && handleAuth()} />
-        <button class="action-btn" on:click={handleAuth} style="margin-top: 1.5rem;">{authMode === 'login' ? 'Sign In' : 'Sign Up'}</button>
+        <button class="action-btn" on:click={handleAuth} style="margin-top: 1.5rem;">{authMode === 'login' ? 'Continue' : 'Create Account'}</button>
         <button class="ghost-btn" on:click={() => { authMode = authMode === 'login' ? 'register' : 'login'; authError = ''; }} style="width: 100%; border: none; margin-top: 0.5rem;">
           {authMode === 'login' ? 'Need an account? Sign up' : 'Already have an account? Sign in'}
         </button>
@@ -319,7 +321,7 @@
         {#if activePage === 'feed'}
           <main class="dashboard-grid">
             <section class="feed-center">
-              <div class="feed-header"><h2>{showArchived ? 'History' : 'Live Dashboard'}</h2></div>
+              <div class="feed-header"><h2>{showArchived ? 'History' : 'Signal Engine'}</h2></div>
               <div class="alerts-list">
                 {#each (showArchived ? archivedAlerts : liveFeedAlerts) as alert (alert.id)}
                   <div class="media-card" animate:flip={{duration: 350, easing: cubicOut}} in:fly={{ y: 20, duration: 400 }} out:slide={{duration: 300}}>
@@ -349,12 +351,12 @@
                   </div>
                 {/each}
               </div>
-              {#if (showArchived ? archivedAlerts : liveFeedAlerts).length === 0}<div class="empty-state" in:fade>No new activity.<br>You're all caught up.</div>{/if}
+              {#if (showArchived ? archivedAlerts : liveFeedAlerts).length === 0}<div class="empty-state" in:fade>No new activity detected.</div>{/if}
             </section>
 
             <aside class="right-panel">
               <div class="inspector-section">
-                <h2>Add Tracker</h2>
+                <h2>New Tracker</h2>
                 <div class="controls">
                   <input type="text" bind:value={targetUrl} placeholder="https://..." on:keydown={e => e.key === 'Enter' && loadProxy()} />
                   <button on:click={loadProxy}>INSPECT</button>
@@ -395,22 +397,18 @@
               </div>
 
               <div class="nodes-section">
-                <h2>Monitored Pages</h2>
+                <h2>Active Trackers</h2>
                 <ul class="node-list" style="margin-top: 1rem;">
                   {#each sortedSites as site (site.id)}
                     <li class="interactive-node {site.is_frozen ? 'frozen-node' : ''}" animate:flip={{duration: 300}} in:fly={{x: 20, duration: 300}} out:slide on:click={() => editingNode = site}>
                       <div class="node-info">
-                        {#if site.status === 'error'}
-                          <span class="status-pulse" style="background:#ff4444; box-shadow:0 0 8px #ff4444;"></span>
-                        {:else}
-                          <span class="status-pulse {site.is_frozen ? 'frozen' : 'active'}"></span>
-                        {/if}
+                        <span class="status-pulse {site.is_frozen ? 'frozen' : 'active'}"></span>
 
                         <img src="https://www.google.com/s2/favicons?domain={getHostname(site.url)}&sz=32" alt="" class="site-favicon" />
                         <strong>{site.name}</strong>
 
-                        {#if site.status === 'error'}
-                          <span class="badge" style="background: rgba(255,68,68,0.2); color: #ff4444; margin-left:8px; border: 1px solid rgba(255,68,68,0.4);">BROKEN</span>
+                        {#if site.last_error}
+                          <span class="badge" style="background: rgba(255,170,0,0.1); color: #ffaa00; margin-left:8px; border: 1px solid rgba(255,170,0,0.3);">ISSUE</span>
                         {:else if unreadCounts[site.id]}
                           <span class="badge" style="background: var(--text-main); color: var(--bg-main); margin-left: 8px;">{unreadCounts[site.id]} NEW</span>
                         {/if}
@@ -461,7 +459,7 @@
       <div class="modal-backdrop" in:fade={{duration: 200}} out:fade={{duration: 200}} on:click={() => editingNode = null}>
         <div class="modal-card mini-modal" on:click|stopPropagation>
           <div class="modal-header">
-            <h3>Configure Tracker</h3>
+            <h3>Tracker Settings</h3>
             <button class="icon-btn close-btn" on:click={() => editingNode = null}>
               <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
             </button>
@@ -481,11 +479,11 @@
               <option value={86400}>24 Hours</option>
             </select>
 
-            {#if editingNode.status === 'error'}
+            {#if editingNode.last_error}
               <div class="auth-error" style="margin-bottom: 1rem; text-align: left;">
-                <strong style="color: #ff4444;">Target Lost / Connection Failed:</strong><br>
+                <strong style="color: #ff4444;">Connection Interrupted:</strong><br>
                 <span style="font-family: monospace; font-size: 0.75rem; color: var(--text-muted);">
-                  {editingNode.last_error || 'Unknown network error.'}
+                  {editingNode.last_error}
                 </span>
               </div>
             {/if}
@@ -639,10 +637,25 @@
   .spinner { width: 16px; height: 16px; border: 2px solid var(--border-color); border-top-color: var(--accent); border-radius: 50%; animation: spin 1s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .controls { display: flex; gap: 0.5rem; margin-bottom: 1rem; } .controls input { margin: 0; flex: 1; } .controls button { margin: 0; width: auto; padding: 0.6rem; }
+
   .iframe-container { height: 280px; border: 1px dashed var(--border-color); border-radius: 8px; position: relative; margin: 1rem 0; background: #000; transition: all 0.3s ease; }
   iframe { width: 100%; height: 100%; border: none; border-radius: 8px; background: #fff;}
   .placeholder { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: var(--text-muted); font-family: monospace; font-size: 0.85rem; }
-  .iframe-container.fullscreen { position: fixed; top: 3vh; left: 3vw; width: 94vw; height: 94vh; z-index: 9999; margin: 0; border: 1px solid var(--border-color); border-radius: 12px; box-shadow: 0 0 0 100vmax rgba(0,0,0,0.85), 0 20px 50px rgba(0,0,0,0.5); }
+
+  .iframe-container.fullscreen {
+    position: fixed;
+    top: 5vh;
+    left: 20vw; /*<-*/
+    right: 5vw;
+    bottom: 5vh;
+    width: auto;
+    height: auto;
+    z-index: 9999;
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    box-shadow: 0 0 0 100vmax rgba(0,0,0,0.7), 0 20px 50px rgba(0,0,0,0.5);
+  }
+
   .iframe-controls { position: absolute; top: 10px; right: 10px; z-index: 10000; display: flex; gap: 8px; }
   .overlay-btn { background: rgba(0,0,0,0.7); color: white; border: 1px solid var(--border-color); border-radius: 6px; padding: 6px; backdrop-filter: blur(4px); }
   .text-overlay-btn { padding: 4px 12px; font-weight: bold; font-size: 0.7rem; letter-spacing: 0.5px; }
@@ -716,6 +729,8 @@
     .feed-center { padding: 1rem; }
     .right-panel { border-left: none; border-top: 1px solid var(--border-color); }
     .alerts-list { grid-template-columns: 1fr; }
+
+    .iframe-container.fullscreen { left: 5vw; }
 
     .mobile-bottom-nav {
       display: flex; position: fixed; bottom: 0; left: 0; right: 0; height: 65px; background: var(--bg-panel); border-top: 1px solid var(--border-color); z-index: 50; justify-content: space-around; align-items: center; padding: 0 1rem;

@@ -37,9 +37,9 @@ async function initDB() {
         const connection = await pool.getConnection();
         await connection.query('SELECT 1');
         connection.release();
-        console.log('DB Connected!');
+        console.log('Database connection established.');
     } catch (err) {
-        console.error('DB connection failed:', err);
+        console.error('Database connection failed:', err);
         process.exit(1);
     }
 }
@@ -65,7 +65,7 @@ async function ssrfProtect(req, res, next) {
 
         if (isPrivateIP(address)) {
             console.warn(`Blocked SSRF attempt to internal IP: ${address}`);
-            return res.status(403).json({ error: 'SSRF Blocked: Internal networks forbidden.' });
+            return res.status(403).json({ error: 'Internal networks are restricted.' });
         }
         next();
     } catch (err) {
@@ -77,10 +77,10 @@ function authenticateToken(req, res, next) {
     const authHeader = req.headers['authorization'];
     const token = (authHeader && authHeader.split(' ')[1]) || req.query.token;
 
-    if (!token) return res.status(401).json({ error: "Access denied" });
+    if (!token) return res.status(401).json({ error: "Access denied." });
 
     jwt.verify(token, JWT_SECRET, (err, user) => {
-        if (err) return res.status(403).json({ error: "Invalid token" });
+        if (err) return res.status(403).json({ error: "Invalid session token." });
         req.user = user;
         next();
     });
@@ -93,7 +93,7 @@ app.post('/api/register', async (req, res) => {
         const [result] = await pool.query('INSERT INTO users (username, password_hash) VALUES (?, ?)', [username, hashedPassword]);
         res.json({ success: true, userId: result.insertId });
     } catch (err) {
-        res.status(400).json({ error: 'Username may already exist.' });
+        res.status(400).json({ error: 'Username is unavailable.' });
     }
 });
 
@@ -107,7 +107,7 @@ app.post('/api/login', async (req, res) => {
             const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
             res.json({ token, username: user.username });
         } else {
-            res.status(401).json({ error: 'Invalid credentials' });
+            res.status(401).json({ error: 'Invalid credentials.' });
         }
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -151,6 +151,20 @@ app.patch('/api/sites/:id/freeze', authenticateToken, async (req, res) => {
     }
 });
 
+app.patch('/api/sites/:id', authenticateToken, async (req, res) => {
+    try {
+        const { name, check_interval_seconds } = req.body;
+        await pool.query(
+            'UPDATE sites SET name = ?, check_interval_seconds = ?, status = "active", consecutive_errors = 0, last_error = NULL WHERE id = ? AND user_id = ?',
+            [name, check_interval_seconds, req.params.id, req.user.id]
+        );
+        res.json({ success: true });
+    } catch (err) {
+        console.error("Update Node Error:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 app.get('/api/alerts', authenticateToken, async (req, res) => {
     try {
         const [rows] = await pool.query(
@@ -171,21 +185,6 @@ app.patch('/api/alerts/:id/read', authenticateToken, async (req, res) => {
     res.json({ success: true });
 });
 
-app.patch('/api/sites/:id', authenticateToken, async (req, res) => {
-    try {
-        const { name, check_interval_seconds } = req.body;
-        // Clears errors on manual update from UI
-        await pool.query(
-            'UPDATE sites SET name = ?, check_interval_seconds = ?, status = "active", consecutive_errors = 0, last_error = NULL WHERE id = ? AND user_id = ?',
-            [name, check_interval_seconds, req.params.id, req.user.id]
-        );
-        res.json({ success: true });
-    } catch (err) {
-        console.error("Update Node Error:", err);
-        res.status(500).json({ error: err.message });
-    }
-});
-
 app.delete('/api/alerts', authenticateToken, async (req, res) => {
     await pool.query('DELETE alerts FROM alerts JOIN sites ON alerts.site_id = sites.id WHERE sites.user_id = ?', [req.user.id]);
     res.json({ success: true });
@@ -198,7 +197,7 @@ app.delete('/api/alerts/:id', authenticateToken, async (req, res) => {
 
 app.get('/api/proxy', authenticateToken, ssrfProtect, async (req, res) => {
     let targetUrl = req.query.url;
-    if (!targetUrl) return res.status(400).send("Missing URL");
+    if (!targetUrl) return res.status(400).send("Missing URL parameter.");
     if (!targetUrl.includes('http')) targetUrl = "https://" + targetUrl;
 
     try {
@@ -211,12 +210,70 @@ app.get('/api/proxy', authenticateToken, ssrfProtect, async (req, res) => {
             }
         });
 
-        const inspectorCSS = await fs.readFile(path.join(__dirname, 'public/inspector.css'), 'utf-8');
-        const inspectorJS = await fs.readFile(path.join(__dirname, 'public/inspector.js'), 'utf-8');
-
         const $ = cheerio.load(response.data);
         $('head').prepend(`<base href="${targetUrl}">`);
+
+        // Disable video pointer events so clicks pass through to the wrapper
+        const inspectorCSS = `
+            #inspector-overlay { background: rgba(0, 153, 255, 0.3); border: 2px solid #0099ff; position: absolute; z-index: 999999; pointer-events: none; transition: all 0.1s; }
+            #inspector-label { background: #0099ff; color: white; padding: 2px 6px; font-family: monospace; font-size: 11px; position: absolute; top: -20px; left: -2px; pointer-events: none; white-space: nowrap; }
+            video, iframe, embed, object { pointer-events: none !important; }
+        `;
         $('head').append(`<style id="piq-inspector-styles">${inspectorCSS}</style>`);
+
+        // click interception, because issues occur
+        const inspectorJS = `
+            let inspectorActive = true;
+            const overlay = document.getElementById('inspector-overlay');
+            const label = document.getElementById('inspector-label');
+
+            window.addEventListener('message', (event) => {
+                if (event.data.type === 'TOGGLE_INSPECTOR') {
+                    inspectorActive = event.data.active;
+                    overlay.style.display = !inspectorActive ? 'none' : 'block';
+                }
+            });
+
+            function getCssSelector(el) {
+                if (el.tagName.toLowerCase() == "html") return "html";
+                let path = [];
+                while (el.nodeType === Node.ELEMENT_NODE) {
+                    let selector = el.nodeName.toLowerCase();
+                    if (el.id) { selector += '#' + el.id; path.unshift(selector); break; } 
+                    else {
+                        let sib = el, nth = 1;
+                        while (sib = sib.previousElementSibling) { if (sib.nodeName.toLowerCase() == selector) nth++; }
+                        if (nth != 1) selector += ":nth-of-type("+nth+")";
+                    }
+                    path.unshift(selector);
+                    el = el.parentNode;
+                }
+                return path.join(" > ");
+            }
+
+            document.addEventListener('mousemove', function(e) {
+                if (!inspectorActive) return;
+                if (e.target.tagName.toLowerCase() === 'body' || e.target.tagName.toLowerCase() === 'html') {
+                    overlay.style.display = 'none'; return;
+                }
+                const rect = e.target.getBoundingClientRect();
+                overlay.style.display = 'block';
+                overlay.style.top = (rect.top + window.scrollY) + 'px';
+                overlay.style.left = (rect.left + window.scrollX) + 'px';
+                overlay.style.width = rect.width + 'px';
+                overlay.style.height = rect.height + 'px';
+                label.innerText = getCssSelector(e.target);
+            }, true);
+
+            window.addEventListener('scroll', function() { if (inspectorActive) overlay.style.display = 'none'; }, true);
+
+            document.addEventListener('click', function(e) {
+                if (!inspectorActive) return;
+                e.preventDefault();
+                e.stopPropagation();
+                window.parent.postMessage({ type: 'SELECTOR_PICKED', selector: getCssSelector(e.target) }, '*');
+            }, true);
+        `;
 
         const inspectorUI = `
             <div id="inspector-overlay"><div id="inspector-label"></div></div>
@@ -230,11 +287,9 @@ app.get('/api/proxy', authenticateToken, ssrfProtect, async (req, res) => {
     }
 });
 
-
 async function runWorker() {
-    process.stdout.write(".");
     try {
-        const [sites] = await pool.query('SELECT * FROM sites WHERE is_frozen = 0 AND status != "suspended"');
+        const [sites] = await pool.query('SELECT * FROM sites WHERE is_frozen = 0');
 
         for (let site of sites) {
             try {
@@ -248,10 +303,7 @@ async function runWorker() {
                 const $ = cheerio.load(data);
                 const target = $(site.css_selector);
 
-                if (!target.length) {
-                    // Axios simply can't see JS-rendered elements. Skipping until Playwright.
-                    continue;
-                }
+                if (!target.length) continue;
 
                 const $cleaner = cheerio.load(target.html());
                 $cleaner('script, style, noscript, svg, path, meta, link, [style*="display: none"], [style*="display:none"], [aria-hidden="true"]').remove();
@@ -319,34 +371,24 @@ async function runWorker() {
                     try {
                         await pool.query('INSERT INTO alerts (site_id, captured_html) VALUES (?, ?)', [site.id, feedHtml]);
                     } catch (dbErr) {
-                        console.error(`\nDB SAVE ERROR on [${site.name}]: ${dbErr.message}`);
-                        await pool.query(
-                            'UPDATE sites SET status = "error", last_error = "Database constraint failure. Scraped HTML is too massive to save." WHERE id = ?',
-                            [site.id]
-                        );
+                        console.error(`DB SAVE ERROR on [${site.name}]: ${dbErr.message}`);
+                        await pool.query('UPDATE sites SET last_error = "Database constraint failure. Payload too large." WHERE id = ?', [site.id]);
                         continue;
                     }
                 }
 
-                await pool.query('UPDATE sites SET last_hash = ?, last_checked = NOW(), consecutive_errors = 0, status = "active", last_error = NULL WHERE id = ?', [newHash, site.id]);
+                // Reset errors on success
+                await pool.query('UPDATE sites SET last_hash = ?, last_checked = NOW(), consecutive_errors = 0, last_error = NULL WHERE id = ?', [newHash, site.id]);
 
             } catch (err) {
-                console.error(`\nAXIOS FETCH ERROR on [${site.name}]: ${err.message}`);
-
+                // DO NOT change status to error. Just record it.
+                console.error(`FETCH ERROR on [${site.name}]: ${err.message}`);
                 const errCount = site.consecutive_errors + 1;
-                let newStatus = site.status;
-                let lastError = err.message;
-
-                if (errCount >= 3) newStatus = 'error';
-
-                await pool.query(
-                    'UPDATE sites SET consecutive_errors = ?, status = ?, last_error = ?, last_checked = NOW() WHERE id = ?',
-                    [errCount, newStatus, lastError.substring(0, 250), site.id]
-                );
+                await pool.query('UPDATE sites SET consecutive_errors = ?, last_error = ?, last_checked = NOW() WHERE id = ?', [errCount, err.message.substring(0, 250), site.id]);
             }
         }
     } catch (err) {
-        console.error("\n[!] Global Worker Engine Error:", err.message);
+        console.error("[!] Worker Engine Error:", err.message);
     }
 }
 
@@ -362,6 +404,6 @@ app.use((req, res) => {
 });
 
 await initDB();
-app.listen(3000, () => { console.log("Server running at http://localhost:3000"); });
+app.listen(3000, () => { console.log("Engine running on port 3000"); });
 
 startEngine();
