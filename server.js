@@ -43,15 +43,15 @@ async function init() {
         const connection = await pool.getConnection();
         await connection.query('SELECT 1');
         connection.release();
-        console.log('Database connected.');
+        console.log('Database connection established.');
 
         globalBrowser = await chromium.launch({
             headless: true,
             args: ['--no-sandbox', '--disable-setuid-sandbox']
         });
-        console.log('Playwright online. Awaiting instructions.');
+        console.log('Playwright Engine online. Awaiting instructions.');
     } catch (err) {
-        console.error('Initialization failed:', err);
+        console.error('Engine initialization failed:', err);
         process.exit(1);
     }
 }
@@ -144,7 +144,6 @@ app.get('/api/sites', authenticateToken, async (req, res) => {
 app.post('/api/sites', authenticateToken, ssrfProtect, async (req, res) => {
     let { name, url, css_selector, interval } = req.body;
     if (!url.includes('http')) url = "https://" + url;
-
     const checkSeconds = interval || 600;
 
     const [result] = await pool.query(
@@ -178,7 +177,6 @@ app.patch('/api/sites/:id', authenticateToken, async (req, res) => {
         );
         res.json({ success: true });
     } catch (err) {
-        console.error("Update Node Error:", err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -208,6 +206,11 @@ app.delete('/api/alerts', authenticateToken, async (req, res) => {
     res.json({ success: true });
 });
 
+app.delete('/api/alerts/archive', authenticateToken, async (req, res) => {
+    await pool.query('DELETE alerts FROM alerts JOIN sites ON alerts.site_id = sites.id WHERE sites.user_id = ? AND alerts.is_read = TRUE', [req.user.id]);
+    res.json({ success: true });
+});
+
 app.delete('/api/alerts/:id', authenticateToken, async (req, res) => {
     await pool.query('DELETE alerts FROM alerts JOIN sites ON alerts.site_id = sites.id WHERE alerts.id = ? AND sites.user_id = ?', [req.params.id, req.user.id]);
     res.json({ success: true });
@@ -227,33 +230,79 @@ app.get('/api/proxy', authenticateToken, ssrfProtect, async (req, res) => {
         const page = await context.newPage();
 
         await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-
         await page.waitForTimeout(1000);
 
         const renderedHtml = await page.content();
         await context.close();
 
-        // Feed fully rendered HTML into Cheerio to inject the Inspector
-        const inspectorCSS = await fs.readFile(path.join(__dirname, 'public/inspector.css'), 'utf-8');
-        const inspectorJS = await fs.readFile(path.join(__dirname, 'public/inspector.js'), 'utf-8');
+        const inspectorCSS = `
+            #inspector-overlay { background: rgba(0, 153, 255, 0.3); border: 2px solid #0099ff; position: absolute; z-index: 999999; pointer-events: none; transition: all 0.1s; }
+            #inspector-label { background: #0099ff; color: white; padding: 2px 6px; font-family: monospace; font-size: 11px; position: absolute; top: -20px; left: -2px; pointer-events: none; white-space: nowrap; }
+            video, iframe, embed, object { pointer-events: none !important; }
+        `;
+
+        // strict selector generator
+        const inspectorJS = `
+            let inspectorActive = true;
+            const overlay = document.getElementById('inspector-overlay');
+            const label = document.getElementById('inspector-label');
+
+            window.addEventListener('message', (event) => {
+                if (event.data.type === 'TOGGLE_INSPECTOR') {
+                    inspectorActive = event.data.active;
+                    overlay.style.display = !inspectorActive ? 'none' : 'block';
+                }
+            });
+
+            function getCssSelector(el) {
+                if (el.tagName.toLowerCase() == "html") return "html";
+                let path = [];
+                while (el.nodeType === Node.ELEMENT_NODE) {
+                    let selector = el.nodeName.toLowerCase();
+                    if (el.id) { selector += '#' + el.id; path.unshift(selector); break; } 
+                    else {
+                        let sib = el.previousElementSibling;
+                        let nth = 1;
+                        while (sib) {
+                            if (sib.nodeType === Node.ELEMENT_NODE) nth++;
+                            sib = sib.previousElementSibling;
+                        }
+                        selector += ":nth-child("+nth+")";
+                    }
+                    path.unshift(selector);
+                    el = el.parentNode;
+                }
+                return path.join(" > ");
+            }
+
+            document.addEventListener('mousemove', function(e) {
+                if (!inspectorActive) return;
+                if (e.target.tagName.toLowerCase() === 'body' || e.target.tagName.toLowerCase() === 'html') {
+                    overlay.style.display = 'none'; return;
+                }
+                const rect = e.target.getBoundingClientRect();
+                overlay.style.display = 'block';
+                overlay.style.top = (rect.top + window.scrollY) + 'px';
+                overlay.style.left = (rect.left + window.scrollX) + 'px';
+                overlay.style.width = rect.width + 'px';
+                overlay.style.height = rect.height + 'px';
+                label.innerText = getCssSelector(e.target);
+            }, true);
+
+            window.addEventListener('scroll', function() { if (inspectorActive) overlay.style.display = 'none'; }, true);
+
+            document.addEventListener('click', function(e) {
+                if (!inspectorActive) return;
+                e.preventDefault();
+                e.stopPropagation();
+                window.parent.postMessage({ type: 'SELECTOR_PICKED', selector: getCssSelector(e.target) }, '*');
+            }, true);
+        `;
 
         const $ = cheerio.load(renderedHtml);
         $('head').prepend(`<base href="${targetUrl}">`);
-
-        const styleTag = `
-            <style id="piq-inspector-styles">
-            ${inspectorCSS}
-            #inspector-overlay { background: rgba(0, 153, 255, 0.3); border: 2px solid #0099ff; position: absolute; z-index: 999999; pointer-events: none; transition: all 0.1s; }
-            #inspector-label { background: #0099ff; color: white; padding: 2px 6px; font-family: monospace; font-size: 11px; position: absolute; top: -20px; left: -2px; pointer-events: none; white-space: nowrap; }
-            </style>
-        `;
-        $('head').append(styleTag);
-
-        const inspectorUI = `
-            <div id="inspector-overlay"><div id="inspector-label"></div></div>
-            <script id="piq-inspector-script">${inspectorJS}</script>
-        `;
-        $('body').prepend(inspectorUI);
+        $('head').append(`<style id="piq-inspector-styles">${inspectorCSS}</style>`);
+        $('body').prepend(`<div id="inspector-overlay"><div id="inspector-label"></div></div><script id="piq-inspector-script">${inspectorJS}</script>`);
 
         res.send($.html());
     } catch (err) {
@@ -272,35 +321,24 @@ async function runWorker() {
             try {
                 const lastChecked = site.last_checked ? new Date(site.last_checked) : new Date(0);
                 const intervalMs = (site.check_interval_seconds || 600) * 1000;
-                const nextCheckTime = new Date(lastChecked.getTime() + intervalMs);
-
-                if (new Date() < nextCheckTime) continue;
+                if (new Date() < new Date(lastChecked.getTime() + intervalMs)) continue;
 
                 context = await globalBrowser.newContext({
                     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
                 });
                 const page = await context.newPage();
 
-                // Block heavy video streams from killing server bandwidth
                 await context.route('**/*.{mp4,webm,ogg,mp3,wav}', route => route.abort());
-
                 await page.goto(site.url, { waitUntil: 'domcontentloaded', timeout: 15000 });
 
-                try {
-                    await page.waitForSelector(site.css_selector, { timeout: 8000 });
-                } catch (e) {
-                    // When selector isn't there yet, close tab and skip
-                    await context.close();
-                    continue;
-                }
+                try { await page.waitForSelector(site.css_selector, { timeout: 8000 }); }
+                catch (e) { await context.close(); continue; }
 
-                // Snap fully rendered html and give it to Cheerio
                 const renderedHtml = await page.content();
                 await context.close();
 
                 const $ = cheerio.load(renderedHtml);
                 const target = $(site.css_selector);
-
                 if (!target.length) continue;
 
                 const $cleaner = cheerio.load(target.html());
@@ -308,48 +346,27 @@ async function runWorker() {
                 let textValue = $cleaner.root().text().replace(/\s+/g, ' ').trim();
 
                 const mediaElements = target.find('img, video source, audio source, picture source').addBack('img, video source, audio source, picture source').toArray();
-
                 const mediaPromises = mediaElements.map(async (el) => {
                     let rawSrc = el.attribs.src || el.attribs['data-src'] || el.attribs.srcset || el.attribs.poster;
                     if (!rawSrc) return "";
-
                     if (rawSrc.includes(',')) rawSrc = rawSrc.split(',')[0].trim().split(' ')[0];
-
-                    if (rawSrc.startsWith('data:')) {
-                        const fileHash = crypto.createHash('md5').update(rawSrc).digest('hex');
-                        return `|B64:${fileHash}`;
-                    }
+                    if (rawSrc.startsWith('data:')) return `|B64:${crypto.createHash('md5').update(rawSrc).digest('hex')}`;
 
                     try {
                         const absoluteMediaUrl = new URL(rawSrc, site.url).href;
-
                         const tagName = el.tagName.toLowerCase();
-                        if (tagName === 'video' || tagName === 'audio' || tagName === 'source') {
-                            return `|HEAVY_MEDIA:${absoluteMediaUrl}`;
-                        }
+                        if (tagName === 'video' || tagName === 'audio' || tagName === 'source') return `|HEAVY_MEDIA:${absoluteMediaUrl}`;
 
-                        const mediaRes = await axios.get(absoluteMediaUrl, {
-                            responseType: 'arraybuffer',
-                            timeout: 10000,
-                            headers: { 'User-Agent': 'Mozilla/5.0' }
-                        });
-
+                        const mediaRes = await axios.get(absoluteMediaUrl, { responseType: 'arraybuffer', timeout: 10000, headers: { 'User-Agent': 'Mozilla/5.0' } });
                         const fileHash = crypto.createHash('md5').update(mediaRes.data).digest('hex');
                         const mimeType = mediaRes.headers['content-type'] || 'image/jpeg';
-                        const base64Data = Buffer.from(mediaRes.data, 'binary').toString('base64');
-
-                        el.piqBase64Override = `data:${mimeType};base64,${base64Data}`;
+                        el.piqBase64Override = `data:${mimeType};base64,${Buffer.from(mediaRes.data, 'binary').toString('base64')}`;
                         return `|BIN:${fileHash}`;
-                    } catch (e) {
-                        return `|URL:${rawSrc}`;
-                    }
+                    } catch (e) { return `|URL:${rawSrc}`; }
                 });
 
                 const resolvedMedia = await Promise.all(mediaPromises);
-                const mediaHashString = resolvedMedia.join('');
-
-                const contentToHash = textValue + mediaHashString;
-                const newHash = crypto.createHash('sha256').update(contentToHash).digest('hex');
+                const newHash = crypto.createHash('sha256').update(textValue + resolvedMedia.join('')).digest('hex');
 
                 if (site.last_hash && newHash !== site.last_hash) {
                     target.find('img, source').addBack('img, source').each((i, el) => {
@@ -363,13 +380,11 @@ async function runWorker() {
                     });
 
                     target.find('[href]').addBack('[href]').each((i, el) => { if (el.attribs.href) el.attribs.href = new URL(el.attribs.href, site.url).href; });
-
                     const feedHtml = $.html(target);
 
-                    try {
-                        await pool.query('INSERT INTO alerts (site_id, captured_html) VALUES (?, ?)', [site.id, feedHtml]);
-                    } catch (dbErr) {
-                        console.error(`DB SAVE ERROR on [${site.name}]: ${dbErr.message}`);
+                    try { await pool.query('INSERT INTO alerts (site_id, captured_html) VALUES (?, ?)', [site.id, feedHtml]); }
+                    catch (dbErr) {
+                        console.error(`[!] DB SAVE ERROR on [${site.name}]: ${dbErr.message}`);
                         await pool.query('UPDATE sites SET last_error = "Database constraint failure. Payload too large." WHERE id = ?', [site.id]);
                         continue;
                     }
@@ -379,19 +394,17 @@ async function runWorker() {
 
             } catch (err) {
                 if (context) await context.close();
-                console.error(`\nPLAYWRIGHT FETCH ERROR on [${site.name}]: ${err.message}`);
+                console.error(`\n[!] PLAYWRIGHT FETCH ERROR on [${site.name}]: ${err.message}`);
                 const errCount = site.consecutive_errors + 1;
                 await pool.query('UPDATE sites SET consecutive_errors = ?, last_error = ?, last_checked = NOW() WHERE id = ?', [errCount, err.message.substring(0, 250), site.id]);
             }
         }
-    } catch (err) {
-        console.error("\n[!] Worker Error:", err.message);
-    }
+    } catch (err) { console.error("\n[CRITICAL] Worker Engine Error:", err.message); }
 }
 
-async function startEngine() {
+async function start() {
     await runWorker();
-    setTimeout(startEngine, 5000);
+    setTimeout(start, 5000);
 }
 
 app.use(express.static(path.join(__dirname, 'frontend/dist')));
@@ -401,5 +414,5 @@ app.use((req, res) => {
 });
 
 await init();
-app.listen(3000, () => { console.log("Server running on port localhost:3000/"); });
-startEngine();
+app.listen(3000, () => { console.log("Server running on http://localhost:3000"); });
+start();
