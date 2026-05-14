@@ -1,43 +1,70 @@
-(function() {
-    const overlay = document.getElementById('inspector-overlay');
-    const label = document.getElementById('inspector-label');
-    let isActive = true;
+let inspectorActive = true;
+const overlay = document.getElementById('inspector-overlay');
+const label = document.getElementById('inspector-label');
 
-    document.addEventListener('mouseover', (e) => {
-        if (!isActive) return;
-        const target = e.target;
-        if (target.id === 'inspector-overlay' || target.id === 'inspector-label') return;
+overlay.style.pointerEvents = 'none';
+label.style.pointerEvents = 'none';
+overlay.style.position = 'absolute';
+overlay.style.zIndex = '999999';
 
-        const rect = target.getBoundingClientRect();
-        overlay.style.display = 'block';
-        overlay.style.width = rect.width + 'px';
-        overlay.style.height = rect.height + 'px';
-        overlay.style.top = (rect.top + window.scrollY) + 'px';
-        overlay.style.left = (rect.left + window.scrollX) + 'px';
+window.addEventListener('message', (event) => {
+    if (event.data.type === 'TOGGLE_INSPECTOR') {
+        inspectorActive = event.data.active;
+        overlay.style.display = !inspectorActive ? 'none' : 'block';
+    }
+});
 
-        let path = target.tagName.toLowerCase();
-        if (target.id) path += '#' + target.id;
-        else if (target.className && typeof target.className === 'string') {
-            path += '.' + target.className.trim().split(/\s+/).join('.');
+function getCssSelector(el) {
+    if (el.tagName.toLowerCase() == "html") return "html";
+    let path = [];
+    while (el.nodeType === Node.ELEMENT_NODE) {
+        let selector = el.nodeName.toLowerCase();
+        if (el.id) {
+            selector += '#' + el.id;
+            path.unshift(selector);
+            break;
+        } else {
+            let sib = el, nth = 1;
+            while (sib = sib.previousElementSibling) {
+                if (sib.nodeName.toLowerCase() == selector) nth++;
+            }
+            if (nth != 1) selector += ":nth-of-type("+nth+")";
         }
-        label.textContent = path;
-    });
+        path.unshift(selector);
+        el = el.parentNode;
+    }
+    return path.join(" > ");
+}
 
-    document.addEventListener('click', (e) => {
-        if (!isActive) return;
+document.addEventListener('mousemove', function(e) {
+    if (!inspectorActive) return;
+    if (e.target.tagName.toLowerCase() === 'body' || e.target.tagName.toLowerCase() === 'html') {
+        overlay.style.display = 'none';
+        return;
+    }
+    const rect = e.target.getBoundingClientRect();
+    overlay.style.display = 'block';
+    overlay.style.top = (rect.top + window.scrollY) + 'px';
+    overlay.style.left = (rect.left + window.scrollX) + 'px';
+    overlay.style.width = rect.width + 'px';
+    overlay.style.height = rect.height + 'px';
+    label.innerText = getCssSelector(e.target);
+}, true);
+
+window.addEventListener('scroll', function() {
+    if (inspectorActive) overlay.style.display = 'none';
+}, true);
+
+// Intercept ALL interaction events before the video can process them
+['click', 'mousedown', 'mouseup', 'pointerdown', 'pointerup'].forEach(evt => {
+    document.addEventListener(evt, function(e) {
+        if (!inspectorActive) return;
         e.preventDefault();
         e.stopPropagation();
 
-        let path = e.target.tagName.toLowerCase();
-        if (e.target.id) path += '#' + e.target.id;
-        else if (e.target.className && typeof e.target.className === 'string') {
-            path += '.' + e.target.className.trim().split(/\s+/).join('.');
+        if (evt === 'click') {
+            const selector = getCssSelector(e.target);
+            window.parent.postMessage({ type: 'SELECTOR_PICKED', selector: selector }, '*');
         }
-
-        // Send the selector back to Svelte
-        window.parent.postMessage({ type: 'SELECTOR_PICKED', selector: path }, '*');
-        isActive = false; // Turn off after click
-        overlay.style.display = 'none';
-        alert("Target Locked! You can now save it in the Dashboard.");
-    }, true);
-})();
+    }, true); // 'true' forces the capture phase
+});
