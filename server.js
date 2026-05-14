@@ -12,6 +12,7 @@ import { promisify } from 'util';
 import fs from "fs/promises";
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
+import { chromium } from 'playwright';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -25,6 +26,8 @@ app.use('/assets', express.static('public'));
 const lookupAsync = promisify(dns.lookup);
 const JWT_SECRET = process.env.JWT_SECRET;
 
+let globalBrowser;
+
 const pool = mysql.createPool({
     host: process.env.DB_HOST,
     user: process.env.DB_USER,
@@ -32,17 +35,29 @@ const pool = mysql.createPool({
     database: process.env.DB_NAME,
 });
 
-async function initDB() {
+async function init() {
     try {
         const connection = await pool.getConnection();
         await connection.query('SELECT 1');
         connection.release();
-        console.log('Database connection established.');
+        console.log('Database connected.');
+
+        globalBrowser = await chromium.launch({
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox']
+        });
+        console.log('Playwright online. Awaiting instructions.');
     } catch (err) {
-        console.error('Database connection failed:', err);
+        console.error('Initialization failed:', err);
         process.exit(1);
     }
 }
+
+process.on('SIGINT', async () => {
+    console.log("\nShutting down engine...");
+    if (globalBrowser) await globalBrowser.close();
+    process.exit();
+});
 
 function isPrivateIP(ip) {
     const privateIPRegex = /^(127\.)|(10\.)|(172\.1[6-9]\.)|(172\.2[0-9]\.)|(172\.3[0-1]\.)|(192\.168\.)|(::1)|(fe80:)/;
@@ -200,80 +215,36 @@ app.get('/api/proxy', authenticateToken, ssrfProtect, async (req, res) => {
     if (!targetUrl) return res.status(400).send("Missing URL parameter.");
     if (!targetUrl.includes('http')) targetUrl = "https://" + targetUrl;
 
+    let context;
     try {
-        const response = await axios.get(targetUrl, {
-            timeout: 15000,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5'
-            }
+        context = await globalBrowser.newContext({
+            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            viewport: { width: 1280, height: 800 }
         });
+        const page = await context.newPage();
 
-        const $ = cheerio.load(response.data);
+        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+
+        await page.waitForTimeout(1000);
+
+        const renderedHtml = await page.content();
+        await context.close();
+
+        // Feed fully rendered HTML into Cheerio to inject the Inspector
+        const inspectorCSS = await fs.readFile(path.join(__dirname, 'public/inspector.css'), 'utf-8');
+        const inspectorJS = await fs.readFile(path.join(__dirname, 'public/inspector.js'), 'utf-8');
+
+        const $ = cheerio.load(renderedHtml);
         $('head').prepend(`<base href="${targetUrl}">`);
 
-        // Disable video pointer events so clicks pass through to the wrapper
-        const inspectorCSS = `
+        const styleTag = `
+            <style id="piq-inspector-styles">
+            ${inspectorCSS}
             #inspector-overlay { background: rgba(0, 153, 255, 0.3); border: 2px solid #0099ff; position: absolute; z-index: 999999; pointer-events: none; transition: all 0.1s; }
             #inspector-label { background: #0099ff; color: white; padding: 2px 6px; font-family: monospace; font-size: 11px; position: absolute; top: -20px; left: -2px; pointer-events: none; white-space: nowrap; }
-            video, iframe, embed, object { pointer-events: none !important; }
+            </style>
         `;
-        $('head').append(`<style id="piq-inspector-styles">${inspectorCSS}</style>`);
-
-        // click interception, because issues occur
-        const inspectorJS = `
-            let inspectorActive = true;
-            const overlay = document.getElementById('inspector-overlay');
-            const label = document.getElementById('inspector-label');
-
-            window.addEventListener('message', (event) => {
-                if (event.data.type === 'TOGGLE_INSPECTOR') {
-                    inspectorActive = event.data.active;
-                    overlay.style.display = !inspectorActive ? 'none' : 'block';
-                }
-            });
-
-            function getCssSelector(el) {
-                if (el.tagName.toLowerCase() == "html") return "html";
-                let path = [];
-                while (el.nodeType === Node.ELEMENT_NODE) {
-                    let selector = el.nodeName.toLowerCase();
-                    if (el.id) { selector += '#' + el.id; path.unshift(selector); break; } 
-                    else {
-                        let sib = el, nth = 1;
-                        while (sib = sib.previousElementSibling) { if (sib.nodeName.toLowerCase() == selector) nth++; }
-                        if (nth != 1) selector += ":nth-of-type("+nth+")";
-                    }
-                    path.unshift(selector);
-                    el = el.parentNode;
-                }
-                return path.join(" > ");
-            }
-
-            document.addEventListener('mousemove', function(e) {
-                if (!inspectorActive) return;
-                if (e.target.tagName.toLowerCase() === 'body' || e.target.tagName.toLowerCase() === 'html') {
-                    overlay.style.display = 'none'; return;
-                }
-                const rect = e.target.getBoundingClientRect();
-                overlay.style.display = 'block';
-                overlay.style.top = (rect.top + window.scrollY) + 'px';
-                overlay.style.left = (rect.left + window.scrollX) + 'px';
-                overlay.style.width = rect.width + 'px';
-                overlay.style.height = rect.height + 'px';
-                label.innerText = getCssSelector(e.target);
-            }, true);
-
-            window.addEventListener('scroll', function() { if (inspectorActive) overlay.style.display = 'none'; }, true);
-
-            document.addEventListener('click', function(e) {
-                if (!inspectorActive) return;
-                e.preventDefault();
-                e.stopPropagation();
-                window.parent.postMessage({ type: 'SELECTOR_PICKED', selector: getCssSelector(e.target) }, '*');
-            }, true);
-        `;
+        $('head').append(styleTag);
 
         const inspectorUI = `
             <div id="inspector-overlay"><div id="inspector-label"></div></div>
@@ -283,15 +254,18 @@ app.get('/api/proxy', authenticateToken, ssrfProtect, async (req, res) => {
 
         res.send($.html());
     } catch (err) {
+        if (context) await context.close();
         res.status(500).send("Proxy error: " + err.message);
     }
 });
 
 async function runWorker() {
+    process.stdout.write(".");
     try {
         const [sites] = await pool.query('SELECT * FROM sites WHERE is_frozen = 0');
 
         for (let site of sites) {
+            let context;
             try {
                 const lastChecked = site.last_checked ? new Date(site.last_checked) : new Date(0);
                 const intervalMs = (site.check_interval_seconds || 600) * 1000;
@@ -299,8 +273,29 @@ async function runWorker() {
 
                 if (new Date() < nextCheckTime) continue;
 
-                const { data } = await axios.get(site.url, { timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0' } });
-                const $ = cheerio.load(data);
+                context = await globalBrowser.newContext({
+                    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                });
+                const page = await context.newPage();
+
+                // Block heavy video streams from killing server bandwidth
+                await context.route('**/*.{mp4,webm,ogg,mp3,wav}', route => route.abort());
+
+                await page.goto(site.url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+
+                try {
+                    await page.waitForSelector(site.css_selector, { timeout: 8000 });
+                } catch (e) {
+                    // When selector isn't there yet, close tab and skip
+                    await context.close();
+                    continue;
+                }
+
+                // Snap fully rendered html and give it to Cheerio
+                const renderedHtml = await page.content();
+                await context.close();
+
+                const $ = cheerio.load(renderedHtml);
                 const target = $(site.css_selector);
 
                 if (!target.length) continue;
@@ -377,18 +372,17 @@ async function runWorker() {
                     }
                 }
 
-                // Reset errors on success
                 await pool.query('UPDATE sites SET last_hash = ?, last_checked = NOW(), consecutive_errors = 0, last_error = NULL WHERE id = ?', [newHash, site.id]);
 
             } catch (err) {
-                // DO NOT change status to error. Just record it.
-                console.error(`FETCH ERROR on [${site.name}]: ${err.message}`);
+                if (context) await context.close();
+                console.error(`\nPLAYWRIGHT FETCH ERROR on [${site.name}]: ${err.message}`);
                 const errCount = site.consecutive_errors + 1;
                 await pool.query('UPDATE sites SET consecutive_errors = ?, last_error = ?, last_checked = NOW() WHERE id = ?', [errCount, err.message.substring(0, 250), site.id]);
             }
         }
     } catch (err) {
-        console.error("[!] Worker Engine Error:", err.message);
+        console.error("\n[!] Worker Error:", err.message);
     }
 }
 
@@ -403,7 +397,6 @@ app.use((req, res) => {
     else { res.status(404).json({ error: "Not found" }); }
 });
 
-await initDB();
-app.listen(3000, () => { console.log("Engine running on port 3000"); });
-
+await init();
+app.listen(3000, () => { console.log("Server running on port localhost:3000/"); });
 startEngine();
