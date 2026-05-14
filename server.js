@@ -12,7 +12,10 @@ import { promisify } from 'util';
 import fs from "fs/promises";
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
-import { chromium } from 'playwright';
+import { chromium } from 'playwright-extra';
+import stealth from 'puppeteer-extra-plugin-stealth';
+
+chromium.use(stealth());
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
