@@ -14,6 +14,8 @@ import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import { chromium } from 'playwright-extra';
 import stealth from 'puppeteer-extra-plugin-stealth';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 
 chromium.use(stealth());
 
@@ -21,9 +23,20 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+
+// 11 standard security headers to block XSS and clickjacking
+app.use(helmet({ contentSecurityPolicy: false })); // allows the proxy iframe to work
+
+// Rate Limiting
+const apiLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 200,
+    message: { error: "Too many requests from this IP. Please try again later." }
+});
+
 app.use(cors());
 app.use(express.json());
-
+app.use('/api/', apiLimiter);
 app.use('/assets', express.static('public'));
 
 const lookupAsync = promisify(dns.lookup);

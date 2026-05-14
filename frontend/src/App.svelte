@@ -1,4 +1,14 @@
 <script>
+
+  /*
+  * Svelte has a SFC architecture.
+  * Unlike vanilla web development, Svelte compiles the <script>, HTML, and <style> blocks together at build time.
+  * Separating the CSS into external files breaks Svelte's scoped styling,
+  * and separating the JS breaks Svelte's reactivity engine.
+  *
+  * That is the reason, I've not exported my modules yet.
+  */
+
   import { onMount } from 'svelte';
   import { fade, slide, fly } from 'svelte/transition';
   import { flip } from 'svelte/animate';
