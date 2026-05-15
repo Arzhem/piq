@@ -1,14 +1,4 @@
 <script>
-
-  /*
-  * Svelte has a SFC architecture.
-  * Unlike vanilla web development, Svelte compiles the <script>, HTML, and <style> blocks together at build time.
-  * Separating the CSS into external files breaks Svelte's scoped styling,
-  * and separating the JS breaks Svelte's reactivity engine.
-  *
-  * That is the reason, I've not exported my modules yet.
-  */
-
   import { onMount } from 'svelte';
   import { fade, slide, fly } from 'svelte/transition';
   import { flip } from 'svelte/animate';
@@ -24,6 +14,7 @@
   let authMode = 'login';
   let authUsername = '';
   let authPassword = '';
+  let authConfirmPassword = '';
   let authError = '';
 
   let targetUrl = '';
@@ -85,9 +76,10 @@
 
   $: { if (typeof window !== 'undefined') localStorage.setItem('piq_theme', theme); }
 
-  function getHostname(url) { try { return new URL(url).hostname; } catch(e) { return ''; } }
+  function getHostname(url) {
+    try { return new URL(url).hostname; } catch(e) { return ''; }
+  }
 
-  // mobile scroll tab switcher
   function switchTab(page, archived = false) {
     activePage = page;
     showArchived = archived;
@@ -132,26 +124,49 @@
     else { showNotification('Signal restored.', 'success'); if (token) initFetch(); }
   }
 
+  function validatePassword(pwd) {
+    if (pwd.length < 8) return "Password must be at least 8 characters.";
+    if (!/[A-Z]/.test(pwd)) return "Password must contain an uppercase letter.";
+    if (!/[0-9]/.test(pwd)) return "Password must contain a number.";
+    return "";
+  }
+
   async function authFetch(url, options = {}) {
     options.headers = { ...options.headers, 'Authorization': `Bearer ${token}` };
     const res = await fetch(url, options);
-    if (res.status === 401 || res.status === 403) { logout(); throw new Error("Unauthorized"); }
+    if (res.status === 401 || res.status === 403) { logout(); throw new Error("Unauthorized or Session Expired"); }
     return res;
   }
 
   async function handleAuth() {
     authError = '';
+
+    if (authMode === 'register') {
+      const pwdIssue = validatePassword(authPassword);
+      if (pwdIssue) { authError = pwdIssue; return; }
+      if (authPassword !== authConfirmPassword) { authError = "Passwords do not match."; return; }
+    }
+
     const endpoint = authMode === 'login' ? '/api/login' : '/api/register';
     try {
-      const res = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: authUsername, password: authPassword }) });
+      const res = await fetch(`${API_BASE.replace('/api', '')}${endpoint}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: authUsername, password: authPassword })
+      });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Authentication failed');
 
       if (authMode === 'register') {
-        authMode = 'login'; showNotification('Account created. Please log in.', 'success');
+        authMode = 'login';
+        authPassword = '';
+        authConfirmPassword = '';
+        showNotification('Account created. Please log in.', 'success');
       } else {
-        token = data.token; localStorage.setItem('piq_token', token);
-        authUsername = ''; authPassword = ''; initFetch();
+        token = data.token;
+        localStorage.setItem('piq_token', token);
+        authUsername = '';
+        authPassword = '';
+        initFetch();
       }
     } catch (err) { authError = err.message; }
   }
@@ -223,7 +238,6 @@
   async function markAsRead(id) { await authFetch(`${API_BASE}/alerts/${id}/read`, { method: 'PATCH' }); alerts = alerts.map(a => a.id === id ? { ...a, is_read: 1 } : a); if(activeModalAlert && activeModalAlert.id === id) activeModalAlert.is_read = 1; }
   async function deleteAlert(id) { await authFetch(`${API_BASE}/alerts/${id}`, { method: 'DELETE' }); alerts = alerts.filter(a => a.id !== id); if(activeModalAlert && activeModalAlert.id === id) activeModalAlert = null; }
 
-  // Distinct clear functions based on active view
   async function clearAlerts() {
     if(showArchived) {
       await authFetch(`${API_BASE}/alerts/archive`, { method: 'DELETE' });
@@ -236,20 +250,15 @@
 
   function handleWindowClick(e) { if (showUserMenu && !e.target.closest('.user-menu-container')) showUserMenu = false; }
 
-  // explicitly handling <a> tags
   function handleModalMediaClick(e) {
     const anchor = e.target.closest('a');
     if (anchor) {
       let href = anchor.getAttribute('href');
       if (href && !href.startsWith('javascript:')) {
-        e.preventDefault();
-        e.stopPropagation();
-        window.open(href, '_blank');
-        return;
+        e.preventDefault(); e.stopPropagation(); window.open(href, '_blank'); return;
       }
     }
 
-    // intercept images and videos
     const mediaEl = e.target.closest('video, img');
     if (mediaEl) {
       let src = mediaEl.getAttribute('src') || mediaEl.currentSrc;
@@ -260,9 +269,7 @@
       if (!src && mediaEl.tagName.toLowerCase() === 'video') src = mediaEl.getAttribute('poster');
 
       if (src && !src.startsWith('data:')) {
-        e.preventDefault();
-        e.stopPropagation();
-        window.open(src, '_blank');
+        e.preventDefault(); e.stopPropagation(); window.open(src, '_blank');
       }
     }
   }
@@ -289,8 +296,17 @@
         <img src={piq_logo} alt="piq" class="auth-logo" />
         <h2 style="text-align: center; margin-bottom: 2rem;">{authMode === 'login' ? 'Sign In' : 'Create Workspace'}</h2>
         {#if authError}<div class="auth-error" in:slide>{authError}</div>{/if}
+
         <input type="text" bind:value={authUsername} placeholder="Username" />
-        <input type="password" bind:value={authPassword} placeholder="Password" on:keydown={e => e.key === 'Enter' && handleAuth()} />
+        <input type="password" bind:value={authPassword} placeholder="Password" on:keydown={e => e.key === 'Enter' && authMode === 'login' && handleAuth()} />
+
+        {#if authMode === 'register'}
+          <input type="password" bind:value={authConfirmPassword} placeholder="Confirm Password" on:keydown={e => e.key === 'Enter' && handleAuth()} style="margin-top: 0.5rem;" />
+          <p style="font-size: 0.7rem; color: var(--text-muted); margin-top: 0.5rem; text-align: left;">
+            * Minimum 8 characters, 1 uppercase, 1 number.
+          </p>
+        {/if}
+
         <button class="action-btn" on:click={handleAuth} style="margin-top: 1.5rem;">{authMode === 'login' ? 'Continue' : 'Create Account'}</button>
         <button class="ghost-btn" on:click={() => { authMode = authMode === 'login' ? 'register' : 'login'; authError = ''; }} style="width: 100%; border: none; margin-top: 0.5rem;">
           {authMode === 'login' ? 'Need an account? Sign up' : 'Already have an account? Sign in'}
@@ -341,7 +357,7 @@
               </button>
               {#if showUserMenu}
                 <div class="dropdown-menu" in:fly={{y: -10, duration: 150}}>
-                  <button on:click={() => { activePage = 'settings'; showUserMenu = false; }}>Settings</button>
+                  <button on:click={() => { switchTab('settings', false); showUserMenu = false; }}>Settings</button>
                   <div class="dropdown-divider"></div>
                   <button style="color: #ff4444;" on:click={() => requestConfirm("Sign Out", "End the current session?", "SIGN OUT", logout)}>Sign Out</button>
                 </div>
@@ -481,8 +497,27 @@
         {:else if activePage === 'settings'}
           <main class="settings-page" in:fade={{duration: 200}}>
             <div class="settings-container">
-              <h2>SETTINGS</h2>
-              <div class="setting-card">
+              <h2>WORKSPACE SETTINGS</h2>
+
+              <div class="setting-card" style="margin-bottom: 1rem; align-items: flex-start; flex-direction: column; gap: 1rem;">
+                <div class="setting-info" style="width: 100%;">
+                  <h3 style="display: flex; align-items: center; gap: 8px;">
+                    <div style="background: var(--accent); color: var(--bg-main); width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold;">
+                      {authUsername ? authUsername.charAt(0).toUpperCase() : 'U'}
+                    </div>
+                    {authUsername || 'User'}
+                  </h3>
+                  <p style="margin-top: 4px;">Standard SaaS License</p>
+                </div>
+                <div style="width: 100%; border-top: 1px solid var(--border-color); padding-top: 1rem; display: flex; gap: 1rem;">
+                  <div style="flex: 1;">
+                    <label style="font-size: 0.75rem; color: var(--text-muted); font-weight: bold;">API KEY (READ ONLY)</label>
+                    <input type="text" value="piq_live_8f92a1b4c3d5e6f7g8h9" disabled style="background: var(--bg-main); color: var(--text-muted); font-family: monospace; margin-top: 4px;" />
+                  </div>
+                </div>
+              </div>
+
+              <div class="setting-card" style="margin-bottom: 1rem;">
                 <div class="setting-info"><h3>Appearance</h3><p>Select your preferred UI theme.</p></div>
                 <div class="setting-control">
                   <select bind:value={theme}>
@@ -491,6 +526,27 @@
                   </select>
                 </div>
               </div>
+
+              <div class="setting-card mobile-only" style="margin-bottom: 1rem; border-color: rgba(255, 170, 0, 0.3); background: rgba(255, 170, 0, 0.05);">
+                <div class="setting-info">
+                  <h3 style="color: #ffaa00;">Session</h3>
+                  <p>End your current session securely.</p>
+                </div>
+                <div class="setting-control">
+                  <button class="ghost-btn" style="color: #ffaa00; border-color: #ffaa00;" on:click={() => requestConfirm("Sign Out", "End the current session?", "SIGN OUT", logout)}>Sign Out</button>
+                </div>
+              </div>
+
+              <div class="setting-card" style="border-color: rgba(255, 68, 68, 0.3); background: rgba(255, 68, 68, 0.05);">
+                <div class="setting-info">
+                  <h3 style="color: #ff4444;">Danger Zone</h3>
+                  <p>Permanently delete your account and all tracker data.</p>
+                </div>
+                <div class="setting-control">
+                  <button class="action-btn danger-bg" on:click={() => requestConfirm("Delete Account", "This action is irreversible. Are you sure?", "DELETE ACCOUNT", logout)}>Delete Account</button>
+                </div>
+              </div>
+
             </div>
           </main>
         {/if}
