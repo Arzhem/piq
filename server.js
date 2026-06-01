@@ -23,20 +23,27 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+app.set('trust proxy', 1);
 
-// 11 standard security headers to block XSS and clickjacking
+// standard security headers to block XSS and clickjacking
 app.use(helmet({ contentSecurityPolicy: false })); // allows the proxy iframe to work
 
 // Rate Limiting
-const apiLimiter = rateLimit({
+/* const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 200,
   message: { error: "Too many requests from this IP. Please try again later." },
+}); */
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 50, // Limit each IP to 50 login/register requests per window
+  message: { error: "Too many attempts from this IP. Please try again later." },
 });
 
 app.use(cors());
 app.use(express.json());
-app.use("/api/", apiLimiter);
+// app.use("/api/", apiLimiter);
 app.use("/assets", express.static("public"));
 
 const lookupAsync = promisify(dns.lookup);
@@ -124,7 +131,7 @@ function authenticateToken(req, res, next) {
   });
 }
 
-app.post("/api/register", async (req, res) => {
+app.post("/api/register", authLimiter, async (req, res) => {
   try {
     const { username, password } = req.body;
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -138,7 +145,7 @@ app.post("/api/register", async (req, res) => {
   }
 });
 
-app.post("/api/login", async (req, res) => {
+app.post("/api/login", authLimiter, async (req, res) => {
   const { username, password } = req.body;
   try {
     const [rows] = await pool.query("SELECT * FROM users WHERE username = ?", [
