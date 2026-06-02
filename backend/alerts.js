@@ -63,7 +63,11 @@ router.delete("/alerts/:id", authenticateToken, async (req, res) => {
     `DELETE alerts
      FROM alerts
      JOIN sites ON sites.id = alerts.site_id
-     WHERE alerts.id = ? AND sites.user_id = ?`,
+     WHERE alerts.i`DELETE alerts
+     FROM alerts
+     JOIN sites ON alerts.site_id = sites.id
+     WHERE sites.user_id = ? AND alerts.is_read = TRUE`,
+    [req.user.id],d = ? AND sites.user_id = ?`,
     [req.params.id, req.user.id],
   );
 

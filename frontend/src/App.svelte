@@ -66,6 +66,7 @@
 
   onMount(() => {
     if ($token) initFetch();
+    // жива връзка
     const pollInterval = setInterval(async () => { if ($serverStatus === 'connected' && $token) await fetchAlerts(true); }, 5000);
     window.addEventListener('offline', () => handleNetworkChange('offline'));
     window.addEventListener('online', () => handleNetworkChange('connected'));
